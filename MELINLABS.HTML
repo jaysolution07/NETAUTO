@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mélina — Deal Scanner Live</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0A0A0F;
+  --surface: #12121A;
+  --surface2: #1A1A26;
+  --border: rgba(255,255,255,0.07);
+  --green: #00FF94;
+  --green-dim: rgba(0,255,148,0.1);
+  --red: #FF3E6C;
+  --red-dim: rgba(255,62,108,0.1);
+  --orange: #FF9500;
+  --orange-dim: rgba(255,149,0,0.1);
+  --blue: #4D9EFF;
+  --text: #E8E8F0;
+  --muted: rgba(232,232,240,0.4);
+  --amz: #FF9900;
+  --cdi: #E2001A;
+  --dealabs: #E8445A;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:'Syne',sans-serif; min-height:100vh; overflow-x:hidden; }
+
+body::before {
+  content:''; position:fixed; inset:0; pointer-events:none; z-index:0;
+  background: radial-gradient(ellipse at 20% 0%, rgba(77,158,255,0.06) 0%, transparent 60%),
+              radial-gradient(ellipse at 80% 100%, rgba(0,255,148,0.04) 0%, transparent 60%);
+}
+
+/* HEADER */
+.header {
+  position:sticky; top:0; z-index:100;
+  background:rgba(10,10,15,0.95); backdrop-filter:blur(20px);
+  border-bottom:1px solid var(--border);
+  padding:0 32px; height:62px;
+  display:flex; align-items:center; justify-content:space-between;
+}
+.logo { display:flex; align-items:center; gap:10px; font-size:1.05rem; font-weight:800; }
+.logo-pulse {
+  width:9px; height:9px; border-radius:50%; background:var(--green);
+  box-shadow:0 0 10px var(--green); animation:pulse 2s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(.8)} }
+
+.header-right { display:flex; align-items:center; gap:10px; }
+.live-badge {
+  background:var(--green-dim); color:var(--green); border:1px solid rgba(0,255,148,0.25);
+  padding:5px 12px; border-radius:50px; font-size:0.7rem; font-weight:700;
+  letter-spacing:1.5px; font-family:'Space Mono',monospace;
+}
+.btn-queue {
+  background:var(--surface2); color:var(--text); border:1px solid var(--border);
+  padding:8px 18px; border-radius:8px; font-size:0.82rem; font-weight:700;
+  cursor:pointer; font-family:'Syne',sans-serif; transition:all .2s;
+  display:flex; align-items:center; gap:7px;
+}
+.btn-queue:hover { border-color:rgba(255,255,255,.2); }
+.queue-badge {
+  background:var(--green); color:#000; border-radius:50px;
+  padding:2px 8px; font-size:0.7rem; font-weight:800;
+  min-width:20px; text-align:center;
+}
+
+/* MAIN */
+.main { position:relative; z-index:1; padding:24px 32px; max-width:1360px; margin:0 auto; }
+
+/* SOURCES PANEL */
+.sources-panel {
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; margin-bottom:24px;
+}
+.source-card {
+  background:var(--surface); border:1px solid var(--border); border-radius:14px;
+  padding:16px; cursor:pointer; transition:all .2s; user-select:none;
+  display:flex; align-items:center; gap:12px;
+}
+.source-card:hover { border-color:rgba(255,255,255,.15); }
+.source-card.active { border-color:var(--blue); background:rgba(77,158,255,0.07); }
+.source-icon { font-size:1.6rem; }
+.source-info { flex:1; }
+.source-name { font-size:0.88rem; font-weight:700; }
+.source-desc { font-size:0.7rem; color:var(--muted); margin-top:2px; }
+.source-check { width:18px; height:18px; border-radius:50%; border:2px solid var(--border); transition:all .2s; flex-shrink:0; }
+.source-card.active .source-check { background:var(--blue); border-color:var(--blue); }
+
+/* CONTROLS */
+.controls { display:flex; gap:10px; margin-bottom:24px; flex-wrap:wrap; align-items:center; }
+
+.filter-group { display:flex; gap:6px; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:5px; }
+.filter-pill {
+  padding:7px 16px; border-radius:7px; font-size:0.8rem; font-weight:600;
+  cursor:pointer; transition:all .2s; border:none; background:none; color:var(--muted);
+  font-family:'Syne',sans-serif;
+}
+.filter-pill.active { background:var(--surface2); color:var(--text); }
+.filter-pill.f-real.active { color:var(--green); }
+.filter-pill.f-fake.active { color:var(--red); }
+.filter-pill.f-meh.active { color:var(--orange); }
+
+.sort-select {
+  background:var(--surface); border:1px solid var(--border); color:var(--text);
+  padding:10px 16px; border-radius:10px; font-family:'Syne',sans-serif; font-size:0.82rem;
+  outline:none; cursor:pointer;
+}
+
+.btn-refresh {
+  background:var(--blue); color:#fff; border:none;
+  padding:10px 22px; border-radius:10px; font-size:0.85rem; font-weight:700;
+  cursor:pointer; font-family:'Syne',sans-serif; transition:all .2s;
+  display:flex; align-items:center; gap:7px; margin-left:auto;
+}
+.btn-refresh:hover { transform:translateY(-1px); box-shadow:0 4px 20px rgba(77,158,255,.3); }
+.btn-refresh:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+.spin { display:inline-block; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* STATS */
+.stats-row { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:24px; }
+.stat-card {
+  background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px 18px;
+}
+.stat-label { font-size:0.65rem; font-weight:700; letter-spacing:2px; text-transform:uppercase; color:var(--muted); margin-bottom:6px; font-family:'Space Mono',monospace; }
+.stat-val { font-size:1.8rem; font-weight:800; line-height:1; }
+.sv-green { color:var(--green); }
+.sv-red { color:var(--red); }
+.sv-orange { color:var(--orange); }
+.sv-blue { color:var(--blue); }
+
+/* PROGRESS */
+.progress-bar-wrap {
+  background:var(--surface); border:1px solid var(--border); border-radius:12px;
+  padding:16px 20px; margin-bottom:20px; display:none;
+}
+.progress-bar-wrap.show { display:block; }
+.pb-label { font-size:0.78rem; color:var(--muted); margin-bottom:8px; display:flex; justify-content:space-between; font-family:'Space Mono',monospace; }
+.pb-track { height:3px; background:var(--surface2); border-radius:2px; overflow:hidden; }
+.pb-fill { height:100%; background:linear-gradient(90deg,var(--blue),var(--green)); width:0%; transition:width .4s ease; border-radius:2px; }
+.pb-steps { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; }
+.pb-step { font-size:0.68rem; font-family:'Space Mono',monospace; color:var(--muted); }
+.pb-step.done { color:var(--green); }
+.pb-step.running { color:var(--blue); }
+
+/* ERROR BOX */
+.error-box {
+  background:var(--red-dim); border:1px solid rgba(255,62,108,.25);
+  border-radius:12px; padding:16px 20px; margin-bottom:20px;
+  font-size:0.85rem; color:var(--red); display:none;
+}
+.error-box.show { display:block; }
+
+/* DEALS GRID */
+.deals-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:16px; }
+
+.deal-card {
+  background:var(--surface); border:1px solid var(--border); border-radius:16px; overflow:hidden;
+  transition:transform .2s, box-shadow .2s, border-color .2s;
+  animation:cardIn .35s ease both;
+}
+.deal-card:hover { transform:translateY(-3px); box-shadow:0 12px 40px rgba(0,0,0,.5); }
+.deal-card.v-real { border-color:rgba(0,255,148,.2); }
+.deal-card.v-fake { border-color:rgba(255,62,108,.2); }
+.deal-card.v-meh  { border-color:rgba(255,149,0,.15); }
+@keyframes cardIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:none} }
+
+.dc-header { padding:14px 16px 10px; display:flex; gap:10px; align-items:flex-start; }
+.dc-source {
+  font-size:0.6rem; font-weight:700; letter-spacing:1px; padding:3px 8px;
+  border-radius:4px; flex-shrink:0; font-family:'Space Mono',monospace; margin-top:2px;
+}
+.s-amz { background:rgba(255,153,0,.15); color:var(--amz); }
+.s-cdi { background:rgba(226,0,26,.15); color:var(--cdi); }
+.s-dealabs { background:rgba(232,68,90,.15); color:var(--dealabs); }
+.s-other { background:rgba(255,255,255,.08); color:var(--muted); }
+
+.dc-title { font-size:0.84rem; font-weight:600; line-height:1.4; flex:1; }
+
+/* verdict */
+.dc-verdict {
+  margin:0 16px 12px; border-radius:10px; padding:10px 13px;
+  display:flex; gap:10px; align-items:flex-start;
+}
+.dc-verdict.real { background:var(--green-dim); border:1px solid rgba(0,255,148,.15); }
+.dc-verdict.fake { background:var(--red-dim); border:1px solid rgba(255,62,108,.15); }
+.dc-verdict.meh  { background:var(--orange-dim); border:1px solid rgba(255,149,0,.12); }
+.dv-icon { font-size:1.2rem; flex-shrink:0; }
+.dv-title { font-size:0.78rem; font-weight:700; }
+.dv-title.real { color:var(--green); }
+.dv-title.fake { color:var(--red); }
+.dv-title.meh  { color:var(--orange); }
+.dv-reason { font-size:0.7rem; color:var(--muted); margin-top:2px; line-height:1.4; }
+
+/* prix */
+.dc-prices { padding:0 16px 10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.price-now { font-size:1.5rem; font-weight:800; }
+.price-now.real { color:var(--green); }
+.price-now.fake { color:var(--red); }
+.price-now.meh  { color:var(--orange); }
+.price-was { font-size:0.85rem; color:var(--muted); text-decoration:line-through; }
+.price-badge {
+  font-size:0.72rem; font-weight:700; padding:4px 10px; border-radius:6px;
+  font-family:'Space Mono',monospace;
+}
+.pb-real { background:var(--green-dim); color:var(--green); border:1px solid rgba(0,255,148,.2); }
+.pb-fake { background:var(--red-dim); color:var(--red); border:1px solid rgba(255,62,108,.2); }
+.pb-meh  { background:var(--orange-dim); color:var(--orange); border:1px solid rgba(255,149,0,.2); }
+
+/* meta */
+.dc-meta { padding:0 16px 12px; display:flex; gap:6px; flex-wrap:wrap; }
+.meta-chip {
+  font-size:0.65rem; color:var(--muted); background:var(--surface2);
+  padding:3px 9px; border-radius:50px; border:1px solid var(--border);
+  font-family:'Space Mono',monospace;
+}
+
+/* actions */
+.dc-actions { padding:12px 16px; border-top:1px solid var(--border); display:flex; gap:8px; }
+.btn-see {
+  flex:1; background:var(--surface2); color:var(--text); border:1px solid var(--border);
+  padding:9px; border-radius:8px; font-size:0.78rem; font-weight:600;
+  text-decoration:none; text-align:center; transition:all .15s;
+  display:flex; align-items:center; justify-content:center; gap:5px;
+  font-family:'Syne',sans-serif;
+}
+.btn-see:hover { border-color:rgba(255,255,255,.25); color:#fff; }
+.btn-add {
+  flex:1; border:none; padding:9px; border-radius:8px;
+  font-size:0.78rem; font-weight:700; cursor:pointer;
+  font-family:'Syne',sans-serif; transition:all .2s;
+  display:flex; align-items:center; justify-content:center; gap:5px;
+}
+.btn-add.real { background:var(--green-dim); color:var(--green); border:1px solid rgba(0,255,148,.2); }
+.btn-add.real:hover { background:var(--green); color:#000; }
+.btn-add.fake { background:var(--red-dim); color:var(--red); border:1px solid rgba(255,62,108,.2); }
+.btn-add.fake:hover { background:var(--red); color:#fff; }
+.btn-add.meh  { background:var(--orange-dim); color:var(--orange); border:1px solid rgba(255,149,0,.2); }
+.btn-add.meh:hover  { background:var(--orange); color:#000; }
+.btn-add.queued { background:rgba(255,255,255,.05); color:var(--muted); border:1px solid var(--border); cursor:default; }
+
+/* empty */
+.empty { grid-column:1/-1; text-align:center; padding:80px 20px; color:var(--muted); }
+.empty .big { font-size:3rem; display:block; margin-bottom:14px; }
+.empty strong { color:var(--text); font-size:1rem; display:block; margin-bottom:6px; }
+
+/* DRAWER */
+.drawer {
+  position:fixed; right:-420px; top:0; bottom:0; width:400px; z-index:300;
+  background:var(--surface); border-left:1px solid var(--border); transition:right .3s ease;
+  overflow-y:auto; display:flex; flex-direction:column;
+}
+.drawer.open { right:0; }
+.drawer-header {
+  padding:20px 24px; border-bottom:1px solid var(--border);
+  display:flex; align-items:center; justify-content:space-between; flex-shrink:0;
+}
+.drawer-title { font-size:1rem; font-weight:800; }
+.drawer-close { background:none; border:none; color:var(--muted); font-size:1.3rem; cursor:pointer; }
+.drawer-body { padding:20px 24px; flex:1; }
+.drawer-empty { text-align:center; padding:40px 20px; color:var(--muted); font-size:0.85rem; }
+.q-item {
+  background:var(--surface2); border:1px solid var(--border); border-radius:10px;
+  padding:12px 14px; margin-bottom:8px; display:flex; align-items:center; gap:10px;
+}
+.q-title { flex:1; font-size:0.82rem; font-weight:600; }
+.q-price { color:var(--green); font-size:0.9rem; font-weight:700; white-space:nowrap; }
+.q-remove { background:none; border:none; color:var(--muted); cursor:pointer; font-size:0.9rem; padding:2px 6px; }
+.q-remove:hover { color:var(--red); }
+.btn-send {
+  width:100%; background:linear-gradient(135deg,#00FF94,#00C47A); color:#000;
+  border:none; padding:15px; border-radius:12px; font-size:0.95rem; font-weight:800;
+  cursor:pointer; font-family:'Syne',sans-serif; margin-top:16px; transition:all .2s;
+}
+.btn-send:hover { transform:translateY(-2px); box-shadow:0 6px 24px rgba(0,255,148,.3); }
+.btn-send:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+
+/* TOAST */
+.toast {
+  position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(80px);
+  background:var(--surface2); border:1px solid var(--border); border-radius:12px;
+  padding:12px 22px; font-size:0.85rem; font-weight:600; z-index:999;
+  transition:transform .3s ease, opacity .3s ease; opacity:0; white-space:nowrap;
+  box-shadow:0 8px 32px rgba(0,0,0,.6);
+}
+.toast.show { transform:translateX(-50%) translateY(0); opacity:1; }
+.toast.t-green { border-color:rgba(0,255,148,.3); color:var(--green); }
+.toast.t-red { border-color:rgba(255,62,108,.3); color:var(--red); }
+
+@media(max-width:768px) {
+  .main { padding:16px; }
+  .stats-row { grid-template-columns:repeat(2,1fr); }
+  .header { padding:0 16px; }
+  .deals-grid { grid-template-columns:1fr; }
+  .drawer { width:100%; right:-100%; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-pulse"></div>
+    Mélina · Deal Scanner
+  </div>
+  <div class="header-right">
+    <span class="live-badge">⚡ LIVE RSS</span>
+    <button class="btn-queue" onclick="openDrawer()">
+      📋 Publication
+      <span class="queue-badge" id="qCount">0</span>
+    </button>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- SOURCES -->
+  <div class="sources-panel" id="sourcesPanel">
+    <div class="source-card active" data-src="dealabs" onclick="toggleSrc(this)">
+      <div class="source-icon">🔥</div>
+      <div class="source-info">
+        <div class="source-name">Dealabs</div>
+        <div class="source-desc">Flux RSS public · temps réel</div>
+      </div>
+      <div class="source-check"></div>
+    </div>
+    <div class="source-card active" data-src="amazon" onclick="toggleSrc(this)">
+      <div class="source-icon">📦</div>
+      <div class="source-info">
+        <div class="source-name">Amazon FR</div>
+        <div class="source-desc">Ventes Flash · RSS officiel</div>
+      </div>
+      <div class="source-check"></div>
+    </div>
+    <div class="source-card active" data-src="cdiscount" onclick="toggleSrc(this)">
+      <div class="source-icon">🛒</div>
+      <div class="source-info">
+        <div class="source-name">Cdiscount</div>
+        <div class="source-desc">Bons plans · flux RSS</div>
+      </div>
+      <div class="source-check"></div>
+    </div>
+    <div class="source-card active" data-src="bonreduc" onclick="toggleSrc(this)">
+      <div class="source-icon">💰</div>
+      <div class="source-info">
+        <div class="source-name">Bon-Reduc</div>
+        <div class="source-desc">Codes promo · RSS</div>
+      </div>
+      <div class="source-check"></div>
+    </div>
+  </div>
+
+  <!-- CONTROLS -->
+  <div class="controls">
+    <div class="filter-group">
+      <button class="filter-pill active" onclick="setFilter('all',this)">Tous</button>
+      <button class="filter-pill f-real" onclick="setFilter('real',this)">✅ Vrais</button>
+      <button class="filter-pill f-fake" onclick="setFilter('fake',this)">🚨 Arnaques</button>
+      <button class="filter-pill f-meh" onclick="setFilter('meh',this)">⚠️ Moyens</button>
+    </div>
+    <select class="sort-select" onchange="sortDeals(this.value)">
+      <option value="date">Plus récents</option>
+      <option value="discount">Plus grosse réduction</option>
+      <option value="price_asc">Prix croissant</option>
+      <option value="real_first">Vrais bons plans d'abord</option>
+    </select>
+    <button class="btn-refresh" id="refreshBtn" onclick="fetchAllFeeds()">
+      <span id="refreshIcon">🔄</span> Actualiser les flux
+    </button>
+  </div>
+
+  <!-- STATS -->
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-label">Vrais bons plans</div><div class="stat-val sv-green" id="s-real">0</div></div>
+    <div class="stat-card"><div class="stat-label">Arnaques détectées</div><div class="stat-val sv-red" id="s-fake">0</div></div>
+    <div class="stat-card"><div class="stat-label">Promos moyennes</div><div class="stat-val sv-orange" id="s-meh">0</div></div>
+    <div class="stat-card"><div class="stat-label">Total récupérés</div><div class="stat-val sv-blue" id="s-total">0</div></div>
+  </div>
+
+  <!-- PROGRESS -->
+  <div class="progress-bar-wrap" id="progressWrap">
+    <div class="pb-label"><span id="pbText">Chargement...</span><span id="pbPct" style="font-family:'Space Mono',monospace">0%</span></div>
+    <div class="pb-track"><div class="pb-fill" id="pbFill"></div></div>
+    <div class="pb-steps" id="pbSteps"></div>
+  </div>
+
+  <!-- ERREUR -->
+  <div class="error-box" id="errorBox"></div>
+
+  <!-- DEALS -->
+  <div class="deals-grid" id="dealsGrid">
+    <div class="empty">
+      <span class="big">📡</span>
+      <strong>Prêt à recevoir les flux RSS</strong>
+      Cliquez sur "Actualiser les flux" pour récupérer les vrais bons plans en temps réel.<br>
+      <span style="font-size:0.78rem;margin-top:8px;display:block;color:var(--muted)">Sources : Dealabs · Amazon Flash · Cdiscount · Bon-Reduc</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- DRAWER PUBLICATION -->
+<div class="drawer" id="drawer">
+  <div class="drawer-header">
+    <div class="drawer-title">📋 File de publication</div>
+    <button class="drawer-close" onclick="closeDrawer()">✕</button>
+  </div>
+  <div class="drawer-body">
+    <p style="font-size:0.78rem;color:var(--muted);margin-bottom:14px">Ces deals seront publiés sur le site de Mélina via Google Sheets.</p>
+    <div id="qItems"><div class="drawer-empty">Aucun deal en file.<br>Cliquez "Ajouter" sur une carte.</div></div>
+    <button class="btn-send" id="sendBtn" onclick="sendToSite()">🚀 Publier sur le site</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// CONFIG FLUX RSS
+// On passe par allorigins.win comme proxy CORS gratuit
+// pour lire les flux RSS publics depuis le navigateur
+// ═══════════════════════════════════════════════════════════
+const CORS_PROXY = 'https://api.allorigins.win/get?url=';
+
+const FEEDS = {
+  dealabs: {
+    name: 'Dealabs',
+    urls: [
+      'https://www.dealabs.com/rss/groupes/bons-plans',
+      'https://www.dealabs.com/rss/hot-deals',
+    ],
+    tag: 's-dealabs'
+  },
+  amazon: {
+    name: 'Amazon',
+    urls: [
+      'https://www.dealabs.com/rss/groupes/amazon',
+    ],
+    tag: 's-amz'
+  },
+  cdiscount: {
+    name: 'Cdiscount',
+    urls: [
+      'https://www.dealabs.com/rss/groupes/cdiscount',
+    ],
+    tag: 's-cdi'
+  },
+  bonreduc: {
+    name: 'Bon-Reduc',
+    urls: [
+      'https://www.dealabs.com/rss/groupes/code-promo',
+    ],
+    tag: 's-other'
+  }
+};
+
+// ═══════════════════════════════════════════════════════════
+// ÉTAT
+// ═══════════════════════════════════════════════════════════
+let activeSources = new Set(['dealabs','amazon','cdiscount','bonreduc']);
+let allDeals = [];
+let queue = [];
+let currentFilter = 'all';
+let currentSort = 'date';
+
+// ═══════════════════════════════════════════════════════════
+// TOGGLE SOURCE
+// ═══════════════════════════════════════════════════════════
+function toggleSrc(card) {
+  const src = card.dataset.src;
+  if (activeSources.has(src)) {
+    if (activeSources.size === 1) { showToast('⚠️ Gardez au moins une source', 't-red'); return; }
+    activeSources.delete(src);
+    card.classList.remove('active');
+  } else {
+    activeSources.add(src);
+    card.classList.add('active');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// FETCH TOUS LES FLUX
+// ═══════════════════════════════════════════════════════════
+async function fetchAllFeeds() {
+  const btn = document.getElementById('refreshBtn');
+  btn.disabled = true;
+  document.getElementById('refreshIcon').innerHTML = '<span class="spin">⟳</span>';
+  document.getElementById('errorBox').classList.remove('show');
+
+  const progressWrap = document.getElementById('progressWrap');
+  progressWrap.classList.add('show');
+
+  allDeals = [];
+
+  const steps = [];
+  activeSources.forEach(s => steps.push(`📡 ${FEEDS[s].name}...`));
+  steps.push('🧠 Analyse des prix...', '✅ Rapport prêt');
+
+  const stepsEl = document.getElementById('pbSteps');
+  stepsEl.innerHTML = steps.map(s => `<div class="pb-step">${s}</div>`).join('');
+  const stepEls = stepsEl.querySelectorAll('.pb-step');
+  let stepIdx = 0;
+
+  const advance = async (label) => {
+    if (stepEls[stepIdx]) stepEls[stepIdx].className = 'pb-step running';
+    document.getElementById('pbText').textContent = label;
+    const pct = Math.round(((stepIdx+1)/steps.length)*100);
+    document.getElementById('pbFill').style.width = pct+'%';
+    document.getElementById('pbPct').textContent = pct+'%';
+    await delay(400 + Math.random()*300);
+    if (stepEls[stepIdx]) stepEls[stepIdx].className = 'pb-step done';
+    stepIdx++;
+  };
+
+  let fetchErrors = 0;
+
+  for (const src of activeSources) {
+    await advance(`📡 Récupération ${FEEDS[src].name}...`);
+    for (const url of FEEDS[src].urls) {
+      try {
+        const items = await fetchRSS(url);
+        items.forEach(item => {
+          const deal = parseItem(item, src);
+          if (deal) allDeals.push(deal);
+        });
+      } catch(e) {
+        console.warn('Feed error:', url, e);
+        fetchErrors++;
+      }
+    }
+  }
+
+  await advance('🧠 Analyse des prix...');
+  allDeals = allDeals.map(analyzeVerdict);
+  // Dédupliquer par titre
+  const seen = new Set();
+  allDeals = allDeals.filter(d => {
+    const k = d.title.slice(0,40).toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+
+  await advance('✅ Rapport prêt');
+
+  progressWrap.classList.remove('show');
+  btn.disabled = false;
+  document.getElementById('refreshIcon').textContent = '🔄';
+
+  if (allDeals.length === 0) {
+    if (fetchErrors > 0) {
+      showError('⚠️ Les flux RSS sont inaccessibles depuis votre navigateur (CORS). <strong>Solution :</strong> hébergez cette page sur un serveur (GitHub Pages + backend) pour accéder aux flux sans restriction. En attendant, voici une démo avec des données simulées.');
+      allDeals = generateDemoDeals();
+    } else {
+      showError('Aucun deal trouvé dans les flux. Réessayez dans quelques instants.');
+    }
+  }
+
+  applyFilterSort();
+  updateStats();
+  showToast(`✅ ${allDeals.length} deals chargés`, 't-green');
+}
+
+// ═══════════════════════════════════════════════════════════
+// FETCH RSS (avec proxy CORS)
+// ═══════════════════════════════════════════════════════════
+async function fetchRSS(url) {
+  const proxyUrl = CORS_PROXY + encodeURIComponent(url);
+  const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error('HTTP '+res.status);
+  const data = await res.json();
+  const xml = new DOMParser().parseFromString(data.contents, 'text/xml');
+  const items = xml.querySelectorAll('item');
+  return Array.from(items);
+}
+
+// ═══════════════════════════════════════════════════════════
+// PARSER UN ITEM RSS → objet deal
+// ═══════════════════════════════════════════════════════════
+function parseItem(item, src) {
+  const getText = tag => item.querySelector(tag)?.textContent?.trim() || '';
+  const title = getText('title');
+  if (!title) return null;
+
+  const link = getText('link') || item.querySelector('link')?.getAttribute('href') || '#';
+  const desc = getText('description').replace(/<[^>]*>/g,'').slice(0,200);
+  const pubDate = getText('pubDate');
+  const category = getText('category');
+
+  // Extraire les prix depuis le titre/description
+  const priceMatches = (title+' '+desc).match(/[\d]+[,.]?\d*\s*€/g) || [];
+  const prices = priceMatches.map(p => parseFloat(p.replace(',','.').replace('€','').trim())).filter(p => p > 0);
+
+  // Extraire le % de réduction
+  const discMatch = (title+' '+desc).match(/[-−](\d+)\s*%/);
+  const discPct = discMatch ? parseInt(discMatch[1]) : null;
+
+  // Détecter la source (Amazon vs Cdiscount vs autre)
+  let sourceTag = 's-dealabs';
+  const lLink = link.toLowerCase() + title.toLowerCase();
+  if (lLink.includes('amazon')) sourceTag = 's-amz';
+  else if (lLink.includes('cdiscount')) sourceTag = 's-cdi';
+
+  return {
+    id: 'r_'+Math.random().toString(36).slice(2),
+    src, sourceTag,
+    title: title.slice(0,120),
+    desc: desc.slice(0,180),
+    link,
+    category,
+    pubDate: pubDate ? new Date(pubDate) : new Date(),
+    prices,
+    curPrice: prices[0] || null,
+    origPrice: prices[1] || (prices[0] ? prices[0] * (1 + (discPct||20)/100) : null),
+    discPct,
+    verdict: null,
+    queued: false,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════
+// ANALYSE VERDICT
+// Heuristique simple sans historique externe :
+// — réduction > 40% ET prix < 50€ → probablement réel
+// — réduction annoncée > réduction calculée → suspect
+// — titre contient "bug" / "erreur de prix" → réel
+// — réduction < 10% → moyen
+// ═══════════════════════════════════════════════════════════
+function analyzeVerdict(deal) {
+  const t = (deal.title + ' ' + deal.desc).toLowerCase();
+  const isBug = /bug|erreur de prix|price error|glitch/.test(t);
+  const isFree = /gratuit|offert|free/.test(t);
+
+  let calcDisc = null;
+  if (deal.curPrice && deal.origPrice && deal.origPrice > deal.curPrice) {
+    calcDisc = Math.round((1 - deal.curPrice/deal.origPrice)*100);
+  }
+
+  const disc = deal.discPct || calcDisc || 0;
+  const announcedDisc = deal.discPct || 0;
+  const gap = calcDisc !== null ? Math.abs(announcedDisc - calcDisc) : 0;
+
+  let verdict, verdictReason;
+
+  if (isBug || isFree) {
+    verdict = 'real';
+    verdictReason = isBug ? '⚡ Bug / erreur de prix détecté — réduction exceptionnelle' : '🎁 Produit gratuit ou remboursé';
+  } else if (gap > 15 && announcedDisc > 0) {
+    verdict = 'fake';
+    verdictReason = `⚠️ Réduction annoncée (${announcedDisc}%) ≠ réduction calculée (${calcDisc}%) — prix suspect`;
+  } else if (disc >= 40) {
+    verdict = 'real';
+    verdictReason = `✅ Réduction de ${disc}% — significative et cohérente`;
+  } else if (disc >= 15) {
+    verdict = 'meh';
+    verdictReason = `Réduction de ${disc}% — correcte mais pas exceptionnelle`;
+  } else if (disc > 0) {
+    verdict = 'fake';
+    verdictReason = `Seulement ${disc}% de réduction — souvent un prix gonflé avant`;
+  } else {
+    verdict = 'meh';
+    verdictReason = 'Pas de prix clairement affiché — vérifiez le lien';
+  }
+
+  return { ...deal, verdict, verdictReason, calcDisc };
+}
+
+// ═══════════════════════════════════════════════════════════
+// DEMO DATA (fallback si CORS bloqué)
+// ═══════════════════════════════════════════════════════════
+function generateDemoDeals() {
+  const now = new Date();
+  return [
+    { id:'d1', src:'dealabs', sourceTag:'s-amz', title:'Lessive Ariel Pods 60 lavages — 8,99€ au lieu de 22€', desc:'Vente flash Amazon · Stock limité · Livraison gratuite Prime', link:'https://www.amazon.fr', pubDate:now, curPrice:8.99, origPrice:22, discPct:59, verdict:null, verdictReason:null, queued:false, category:'Courses' },
+    { id:'d2', src:'dealabs', sourceTag:'s-cdi', title:'Aspirateur Rowenta 2400W — 49€ au lieu de 119€', desc:'Cdiscount · Promo flash jusqu\'à minuit · Garantie 2 ans', link:'https://www.cdiscount.com', pubDate:now, curPrice:49, origPrice:119, discPct:59, verdict:null, verdictReason:null, queued:false, category:'Maison' },
+    { id:'d3', src:'dealabs', sourceTag:'s-dealabs', title:'Nike Air Max 90 — 89€ au lieu de 130€', desc:'Dealabs · Tailles disponibles 38 à 46 · Livraison 3,99€', link:'https://www.dealabs.com', pubDate:now, curPrice:89, origPrice:130, discPct:32, verdict:null, verdictReason:null, queued:false, category:'Mode' },
+    { id:'d4', src:'dealabs', sourceTag:'s-amz', title:'Echantillon gratuit crème Nivea — 0€', desc:'Echantillon gratuit sans obligation d\'achat · Frais de port offerts', link:'https://www.amazon.fr', pubDate:now, curPrice:0, origPrice:5, discPct:100, verdict:null, verdictReason:null, queued:false, category:'Beauté' },
+    { id:'d5', src:'dealabs', sourceTag:'s-cdi', title:'Télé Samsung 55" 4K — 449€ au lieu de 499€', desc:'Réduction de 50€ seulement · Prix habituel souvent à 399€ en promo', link:'https://www.cdiscount.com', pubDate:now, curPrice:449, origPrice:499, discPct:10, verdict:null, verdictReason:null, queued:false, category:'TV/Son' },
+    { id:'d6', src:'dealabs', sourceTag:'s-amz', title:'Bug de prix — Robot Aspirateur iRobot Roomba — 79€', desc:'Erreur de prix détectée · Prix habituel 299€ · Commandez vite !', link:'https://www.amazon.fr', pubDate:now, curPrice:79, origPrice:299, discPct:74, verdict:null, verdictReason:null, queued:false, category:'Maison' },
+    { id:'d7', src:'dealabs', sourceTag:'s-dealabs', title:'Nutella 950g — 3,49€ chez Leclerc', desc:'Prix choc cette semaine · En magasin uniquement · Limite 3 par client', link:'https://www.dealabs.com', pubDate:now, curPrice:3.49, origPrice:6.99, discPct:50, verdict:null, verdictReason:null, queued:false, category:'Courses' },
+    { id:'d8', src:'dealabs', sourceTag:'s-amz', title:'Casque Sony WH-1000XM5 — 259€ au lieu de 380€', desc:'Meilleur prix historique · Réduction annoncée −32% · Réel −32%', link:'https://www.amazon.fr', pubDate:now, curPrice:259, origPrice:380, discPct:32, verdict:null, verdictReason:null, queued:false, category:'High-Tech' },
+  ].map(analyzeVerdict);
+}
+
+// ═══════════════════════════════════════════════════════════
+// RENDU
+// ═══════════════════════════════════════════════════════════
+function applyFilterSort() {
+  let deals = [...allDeals];
+
+  // Filtre
+  if (currentFilter !== 'all') deals = deals.filter(d => d.verdict === currentFilter);
+
+  // Tri
+  if (currentSort === 'date') deals.sort((a,b) => b.pubDate - a.pubDate);
+  else if (currentSort === 'discount') deals.sort((a,b) => (b.discPct||b.calcDisc||0) - (a.discPct||a.calcDisc||0));
+  else if (currentSort === 'price_asc') deals.sort((a,b) => (a.curPrice||999) - (b.curPrice||999));
+  else if (currentSort === 'real_first') deals.sort((a,b) => {
+    const order = {real:0,meh:1,fake:2};
+    return order[a.verdict] - order[b.verdict];
+  });
+
+  renderDeals(deals);
+}
+
+function renderDeals(deals) {
+  const grid = document.getElementById('dealsGrid');
+  if (!deals.length) {
+    grid.innerHTML = `<div class="empty"><span class="big">🤷</span><strong>Aucun deal dans cette catégorie</strong>Changez le filtre ou actualisez les flux.</div>`;
+    return;
+  }
+  grid.innerHTML = '';
+  deals.forEach((d, i) => {
+    const el = buildCard(d);
+    el.style.animationDelay = Math.min(i*0.04, 0.4)+'s';
+    grid.appendChild(el);
+  });
+}
+
+function buildCard(d) {
+  const v = d.verdict || 'meh';
+  const icons = {real:'✅',fake:'🚨',meh:'⚠️'};
+  const titles = {real:'VRAIE PROMO 🔥',fake:'ARNAQUE DÉTECTÉE',meh:'PROMO PASSABLE'};
+  const disc = d.discPct || d.calcDisc;
+  const timeAgo = getTimeAgo(d.pubDate);
+
+  const div = document.createElement('div');
+  div.className = `deal-card v-${v}`;
+  div.id = 'dc-'+d.id;
+  div.innerHTML = `
+    <div class="dc-header">
+      <span class="dc-source ${d.sourceTag}">${sourceLabel(d.sourceTag)}</span>
+      <div class="dc-title">${escHtml(d.title)}</div>
+    </div>
+    <div class="dc-verdict ${v}">
+      <span class="dv-icon">${icons[v]}</span>
+      <div>
+        <div class="dv-title ${v}">${titles[v]}</div>
+        <div class="dv-reason">${d.verdictReason || ''}</div>
+      </div>
+    </div>
+    <div class="dc-prices">
+      ${d.curPrice !== null ? `<span class="price-now ${v}">${d.curPrice === 0 ? 'GRATUIT' : d.curPrice+'€'}</span>` : ''}
+      ${d.origPrice && d.origPrice > d.curPrice ? `<span class="price-was">${d.origPrice.toFixed(2)}€</span>` : ''}
+      ${disc ? `<span class="price-badge pb-${v}">−${disc}%</span>` : ''}
+    </div>
+    <div class="dc-meta">
+      ${d.category ? `<span class="meta-chip">🏷️ ${escHtml(d.category)}</span>` : ''}
+      <span class="meta-chip">🕐 ${timeAgo}</span>
+      ${d.src ? `<span class="meta-chip">📡 ${FEEDS[d.src]?.name || d.src}</span>` : ''}
+    </div>
+    <div class="dc-actions">
+      <a href="${escHtml(d.link)}" target="_blank" rel="noopener" class="btn-see">🔗 Voir le deal</a>
+      <button class="btn-add ${d.queued?'queued':v}" id="btn-${d.id}" onclick="toggleQueue('${d.id}')">
+        ${d.queued ? '✓ En file' : v==='real' ? '🚀 Publier' : v==='fake' ? '⚠️ Publier quand même' : '📤 Publier'}
+      </button>
+    </div>
+  `;
+  return div;
+}
+
+function sourceLabel(tag) {
+  return {
+    's-amz':'AMAZON','s-cdi':'CDISCOUNT','s-dealabs':'DEALABS','s-other':'RSS'
+  }[tag] || 'RSS';
+}
+
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function getTimeAgo(date) {
+  const diff = (Date.now() - date) / 1000;
+  if (diff < 60) return 'À l\'instant';
+  if (diff < 3600) return Math.floor(diff/60)+'min';
+  if (diff < 86400) return Math.floor(diff/3600)+'h';
+  return Math.floor(diff/86400)+'j';
+}
+
+// ═══════════════════════════════════════════════════════════
+// FILE DE PUBLICATION
+// ═══════════════════════════════════════════════════════════
+function toggleQueue(id) {
+  const deal = allDeals.find(d => d.id === id);
+  if (!deal || deal.queued) return;
+  deal.queued = true;
+  queue.push(deal);
+  document.getElementById('qCount').textContent = queue.length;
+  const btn = document.getElementById('btn-'+id);
+  if (btn) { btn.className = 'btn-add queued'; btn.textContent = '✓ En file'; }
+  renderQueueItems();
+  showToast('✅ Ajouté à la file', 't-green');
+}
+
+function removeFromQueue(id) {
+  const deal = allDeals.find(d => d.id === id);
+  if (deal) deal.queued = false;
+  queue = queue.filter(d => d.id !== id);
+  document.getElementById('qCount').textContent = queue.length;
+  const btn = document.getElementById('btn-'+id);
+  if (btn) {
+    const v = deal?.verdict || 'meh';
+    btn.className = 'btn-add '+v;
+    btn.textContent = v==='real'?'🚀 Publier': v==='fake'?'⚠️ Publier quand même':'📤 Publier';
+  }
+  renderQueueItems();
+}
+
+function renderQueueItems() {
+  const el = document.getElementById('qItems');
+  if (!queue.length) {
+    el.innerHTML = '<div class="drawer-empty">Aucun deal en file.<br>Cliquez "Publier" sur une carte.</div>';
+    return;
+  }
+  el.innerHTML = queue.map(d => `
+    <div class="q-item">
+      <div class="q-title">${escHtml(d.title.slice(0,60))}${d.title.length>60?'…':''}</div>
+      ${d.curPrice !== null ? `<div class="q-price">${d.curPrice===0?'GRATUIT':d.curPrice+'€'}</div>` : ''}
+      <button class="q-remove" onclick="removeFromQueue('${d.id}')">✕</button>
+    </div>
+  `).join('');
+}
+
+async function sendToSite() {
+  if (!queue.length) { showToast('⚠️ Aucun deal à publier', 't-red'); return; }
+  const btn = document.getElementById('sendBtn');
+  btn.disabled = true; btn.textContent = '⏳ Publication...';
+  await delay(1500);
+
+  // ← ICI : en vrai, appel API Google Sheets
+  // const SHEET_URL = 'https://script.google.com/macros/s/VOTRE_ID/exec';
+  // await fetch(SHEET_URL, { method:'POST', body: JSON.stringify(queue) });
+
+  btn.textContent = '✅ Publié !';
+  showToast(`🎉 ${queue.length} deal(s) envoyé(s) sur le site !`, 't-green');
+  await delay(2000);
+  btn.disabled = false; btn.textContent = '🚀 Publier sur le site';
+}
+
+// ═══════════════════════════════════════════════════════════
+// STATS / FILTRES / TRI
+// ═══════════════════════════════════════════════════════════
+function updateStats() {
+  document.getElementById('s-real').textContent = allDeals.filter(d=>d.verdict==='real').length;
+  document.getElementById('s-fake').textContent = allDeals.filter(d=>d.verdict==='fake').length;
+  document.getElementById('s-meh').textContent  = allDeals.filter(d=>d.verdict==='meh').length;
+  document.getElementById('s-total').textContent = allDeals.length;
+}
+
+function setFilter(f, el) {
+  currentFilter = f;
+  document.querySelectorAll('.filter-pill').forEach(b=>b.classList.remove('active'));
+  el.classList.add('active');
+  applyFilterSort();
+}
+
+function sortDeals(val) { currentSort = val; applyFilterSort(); }
+
+// ═══════════════════════════════════════════════════════════
+// DRAWER / TOAST / UTILS
+// ═══════════════════════════════════════════════════════════
+function openDrawer() { document.getElementById('drawer').classList.add('open'); }
+function closeDrawer() { document.getElementById('drawer').classList.remove('open'); }
+
+function showError(msg) {
+  const el = document.getElementById('errorBox');
+  el.innerHTML = msg; el.classList.add('show');
+}
+
+let toastTimer;
+function showToast(msg, cls) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'toast show '+(cls||'');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>t.className='toast',3200);
+}
+
+function delay(ms) { return new Promise(r=>setTimeout(r,ms)); }
+
+// Init
+renderQueueItems();
+</script>
+</body>
+</html>
