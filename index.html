@@ -567,14 +567,12 @@ async function fetchAllFeeds() {
 // ═══════════════════════════════════════════════════════════
 async function fetchRSS(url) {
   const proxyUrl = CORS_PROXY + encodeURIComponent(url);
-  const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-  if (!res.ok) throw new Error('HTTP '+res.status);
-  const data = await res.json();
-  const xml = new DOMParser().parseFromString(data.contents, 'text/xml');
+  const res = await fetch(proxyUrl);
+  const text = await res.text();
+  const xml = new DOMParser().parseFromString(text, 'text/xml');
   const items = xml.querySelectorAll('item');
   return Array.from(items);
 }
-
 // ═══════════════════════════════════════════════════════════
 // PARSER UN ITEM RSS → objet deal
 // ═══════════════════════════════════════════════════════════
@@ -883,4 +881,5 @@ renderQueueItems();
 </script>
 </body>
 </html>
+
 
