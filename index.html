@@ -894,7 +894,10 @@ function printPage() {
   window.print();
 }
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
+// ══ SERVICE WORKER ═══════════════════════════════════════════════════
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(()=>{});
+}
 // ══ CLÔTURE BI-ANNUEL ════════════════════════════════════════════════
 function showClotureBi() {
   document.getElementById('cloture-bi-label').value = new Date().getFullYear() + ' – Bi-Annuel';
@@ -1050,3 +1053,4 @@ async function genererPdfCloture(label) {
 </script>
 </body>
 </html>
+
