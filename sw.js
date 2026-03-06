@@ -6,6 +6,10 @@ self.addEventListener('install', e => {
 });
 
 self.addEventListener('fetch', e => {
+  // Ne jamais intercepter les appels vers Google Scripts
+  if (e.request.url.includes('script.google.com')) {
+    return;
+  }
   e.respondWith(
     caches.match(e.request).then(r => r || fetch(e.request))
   );
