@@ -1600,6 +1600,24 @@ function machineNameById(id){
 function buildMaintenance(){
   const currentMachineName = machineNameById(S.maintenanceMachineId);
   const rows = maintenanceRowsForCurrentMachine();
+const machineManager = `
+<div class="add-record-form" style="margin:14px 0">
+  <h3>⚙️ Gestion des machines</h3>
+
+  <div class="form-grid">
+    <div class="form-group">
+      <label>Machine sélectionnée</label>
+      <select id="machine-manager-select">
+        ${buildMachineOptions()}
+      </select>
+    </div>
+  </div>
+
+  <div class="form-actions">
+    <button class="btn" onclick="editMachineUi(document.getElementById('machine-manager-select').value)">✏️ Modifier</button>
+<button class="btn btn-danger" onclick="deleteMachineUi(document.getElementById('machine-manager-select').value)">🗑️ Supprimer</button>
+  </div>
+</div>`;
   let html = `<div class="releve-page-header">
     <div><div class="releve-title">Entretien des machines</div><div class="releve-subtitle">Carnet d'entretien, maintenance preventive et corrective</div></div>
     <span class="releve-count">${rows.length} releve${rows.length>1?'s':''}</span>
@@ -1628,6 +1646,7 @@ function buildMaintenance(){
       <button class="btn" style="background:#f5f5f5;color:#555" onclick="clearMaintenanceForm()">Effacer</button>
     </div>
   </div>`;
+html += machineManager;
   html += `<div class="meta-row" style="margin-bottom:12px"><span style="font-size:13px;font-weight:700;color:var(--teal-dark)">Machine affichee : ${esc(currentMachineName || 'Toutes')}</span><span style="margin-left:auto;font-size:12px;color:#666">${S.machines.length} machine${S.machines.length>1?'s':''} enregistree${S.machines.length>1?'s':''}</span></div>`;
   html += `<div class="records-table-wrap">`;
   if(rows.length===0){
@@ -1687,17 +1706,18 @@ function changeMaintenanceMachine(value){
 }
 
 async function addMachineUi(){
-  const nom = document.getElementById('m-name').value.trim();
-  if(!nom){toast('Nom machine obligatoire', true);return;}
-  try{
-    const r = await api('addMachine',{nom});
-    if(!r.ok){toast('Erreur: '+r.error,true);return;}
-    S.machines.push({_rowIndex:r._rowIndex,id:r.id,nom:r.nom,actif:true});
-    S.maintenanceMachineId = r.id;
-    document.getElementById('m-name').value = '';
-    renderTab('maintenance');
-    toast('Machine ajoutee');
-  }catch(e){toast('Erreur: '+e.message,true);}
+  const input = document.getElementById('m-name');
+  const nom = input.value.trim();
+
+  if(!nom) return toast('Nom obligatoire', true);
+
+  const r = await api('addMachine', { nom });
+  if(!r.ok) return toast('❌ ' + r.error, true);
+
+  input.value = '';
+  S.loaded.delete('maintenance');
+  await loadAndRender('maintenance');
+  toast('✅ Machine ajoutée');
 }
 
 async function addMaintenanceUi(){
@@ -2518,6 +2538,57 @@ async function confirmerCloturePesees(){
   if(!win){const a=document.createElement('a');a.href=url;a.download=label.replace(/[^a-zA-Z0-9\-]/g,'_')+'.html';a.click();}
   try{const r=await api('clearPesees');if(r.ok){S.pesees=[];S.loaded.delete('pesees');res.style.display='block';res.style.background='#E8F5E9';res.style.color='#2E7D32';res.innerHTML='<strong>✅ Clôture réussie !</strong>';setTimeout(()=>{document.getElementById('modal-cloture-pesees').style.display='none';renderTab('pesees');},1500);}else{res.style.display='block';res.style.background='#FFEBEE';res.style.color='#C62828';res.innerHTML='⚠️ '+r.error;}}catch(e){res.style.display='block';res.style.background='#FFEBEE';res.style.color='#C62828';res.innerHTML='❌ '+e.message;}
 }
+async function addMachineUi(){
+  const input = document.getElementById('m-name');
+  const nom = input.value.trim();
+
+  if(!nom) return toast('Nom obligatoire', true);
+
+  const r = await api('addMachine', { nom });
+  if(!r.ok) return toast('❌ ' + r.error, true);
+
+  input.value = '';
+  S.loaded.delete('maintenance');
+  await loadAndRender('maintenance');
+  toast('✅ Machine ajoutée');
+}
+
+async function editMachineUi(id){
+  const machine = S.machines.find(m => m.id === id);
+  if(!machine) return;
+
+  const nom = prompt('Modifier le nom', machine.nom);
+  if(!nom || !nom.trim()) return;
+
+  const r = await api('updateMachine',{
+    _rowIndex: machine._rowIndex,
+    nom: nom.trim()
+  });
+
+  if(!r.ok) return toast('❌ '+r.error,true);
+
+  S.loaded.delete('maintenance');
+  await loadAndRender('maintenance');
+  toast('✅ Machine modifiée');
+}
+
+async function deleteMachineUi(id){
+  const machine = S.machines.find(m => m.id === id);
+  if(!machine) return;
+
+  if(!confirm('Supprimer cette machine ?')) return;
+
+  const r = await api('deleteMachine',{
+    _rowIndex: machine._rowIndex
+  });
+
+  if(!r.ok) return toast('❌ '+r.error,true);
+
+  S.loaded.delete('maintenance');
+  await loadAndRender('maintenance');
+  toast('🗑️ Machine supprimée');
+}
+
 </script>
 </body>
 </html>
