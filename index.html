@@ -671,10 +671,13 @@ async function doLogin() {
     if (data.ok) {
       btn.querySelector('.btn-login-text').textContent = '✅ Connexion réussie…';
       API_URL = data.webappUrl || DIRECT_API_URL;
+      PREFETCH = null; FULL_SYNC_STARTED = false; INIT_TAB = 'chaud'; // nouvelle session → sync à refaire
       // Persiste au refresh, effacé à la fermeture de l'onglet/navigateur
       sessionStorage.setItem('tc_api_url', API_URL);
       sessionStorage.setItem('tc_nom', data.nom || id || 'TempClean');
-      setTimeout(() => showApp(data.nom || id || 'TempClean'), 700);
+      // ⚡ Lance le bootstrap PENDANT la transition → 0 ms perdu
+      startBootstrapPrefetch();
+      showApp(data.nom || id || 'TempClean');
     } else {
       loginAttempts++;
       updateDots();
@@ -704,6 +707,7 @@ function tryOpenFromMasterRedirect() {
     const cleanUrl = window.location.origin + window.location.pathname;
     window.history.replaceState({}, document.title, cleanUrl);
   } catch (e) {}
+  startBootstrapPrefetch(); // ⚡ réveille l'app pendant la redirection
   showApp(nom);
   return true;
 }
@@ -734,13 +738,15 @@ function showApp(nomEntreprise) {
 function logout() {
   if (DEMO_MODE) { toast('Mode demo actif - deconnexion desactivee'); return; }
   if (!confirm('Se déconnecter ?')) return;
+  clearCache(); // purge le cache local (sécurité si un autre utilisateur se connecte)
+  PREFETCH = null; FULL_SYNC_STARTED = false;
   API_URL = '';
   sessionStorage.removeItem('tc_api_url');
   sessionStorage.removeItem('tc_nom');
   document.getElementById('app-screen').classList.remove('visible');
   document.getElementById('login-screen').style.display = 'flex';
   // Reset état
-  Object.assign(S, {tab:'chaud',checks:{},appChecks:{},comments:{},meta:{},appareils:[],renaming:{},loaded:new Set(),prelevements:[],pesees:[],machines:[],maintenanceRows:[],maintenanceMachineId:'',editingReleve:null,editingPesee:null,editingMaintenance:null,editingFreezerId:null,freezerItems:[],freezerMeta:{dateDebut:'',dateFin:'',filtreRack:''},freezerDraft:{produit:'',placements:[]},freezerSearch:''});
+  Object.assign(S, {tab:'chaud',checks:{},appChecks:{},comments:{},meta:{},states:{},appareils:[],renaming:{},loaded:new Set(),prelevements:[],pesees:[],machines:[],maintenanceRows:[],maintenanceMachineId:'',editingReleve:null,editingPesee:null,editingMaintenance:null,editingFreezerId:null,freezerItems:[],freezerMeta:{dateDebut:'',dateFin:'',filtreRack:''},freezerDraft:{produit:'',placements:[]},freezerSearch:''});
   elogRows = [];
   // Reset bouton login
   const btn = document.getElementById('btn-login');
@@ -757,11 +763,14 @@ window.onload = () => {
     return;
   }
   if (tryOpenFromMasterRedirect()) return;
+  // Rouvre sur le dernier onglet utilisé (restauration de session)
+  INIT_TAB = sessionStorage.getItem('tc_last_tab') || 'chaud';
   // Si une session existe déjà (refresh), on repart directement dans l'app
   const savedUrl = sessionStorage.getItem('tc_api_url');
   const savedNom = sessionStorage.getItem('tc_nom');
   if (savedUrl) {
     API_URL = savedUrl;
+    startBootstrapPrefetch(); // ⚡ réveille Google pendant l'affichage du cache
     showApp(savedNom || '');
   } else {
     document.getElementById('inp-id').focus();
@@ -807,29 +816,43 @@ async function api(action, params = {}) {
 }
 
 // 🔄 Retry automatique : les /exec Apps Script renvoient parfois des 404/500
-// transitoires (flakiness connue de Google). On réessaie jusqu'à 3 fois avec
-// un backoff croissant. Sans risque même pour les écritures : le backend lit
-// la DERNIÈRE valeur de chaque clé, donc un doublon d'écriture est inoffensif.
-async function fetchWithRetry(url, options, maxAttempts = 3) {
+// transitoires (flakiness connue de Google) et peuvent mettre 10-30 s à
+// démarrer (cold start). On réessaie jusqu'à 4 fois, chaque tentative a un
+// timeout de 30 s (AbortController) pour ne jamais rester bloqué à l'infini.
+// Sans risque même pour les écritures : le backend lit la DERNIÈRE valeur de
+// chaque clé, donc un doublon d'écriture est inoffensif.
+const API_TIMEOUT_MS = 30000;
+
+function setApiStatus(txt) {
+  const el = document.getElementById('api-status');
+  if (el) el.textContent = txt;
+}
+
+async function fetchWithRetry(url, options, maxAttempts = 4) {
   let lastErr = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) setApiStatus(`Tentative ${attempt}/${maxAttempts}…`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
     try {
-      const res = await fetch(url, options);
+      const res = await fetch(url, { ...options, signal: controller.signal });
       const transient = res.status === 404 || res.status === 429 || res.status >= 500;
       if (transient && attempt < maxAttempts) {
         console.warn(`API transitoire HTTP ${res.status}, nouvelle tentative ${attempt + 1}/${maxAttempts}…`);
-        await new Promise(r => setTimeout(r, 700 * attempt + Math.random() * 400));
+        await new Promise(r => setTimeout(r, 1000 * attempt + Math.random() * 600));
         continue;
       }
       return res;
     } catch (e) {
-      lastErr = e;
+      lastErr = (e && e.name === 'AbortError') ? new Error('Délai dépassé (' + (API_TIMEOUT_MS/1000) + ' s)') : e;
       if (attempt < maxAttempts) {
-        console.warn(`Réseau indisponible (tentative ${attempt}/${maxAttempts}), réessai…`, e.message);
-        await new Promise(r => setTimeout(r, 700 * attempt + Math.random() * 400));
+        console.warn(`Échec tentative ${attempt}/${maxAttempts} (${lastErr.message}), réessai…`);
+        await new Promise(r => setTimeout(r, 1000 * attempt + Math.random() * 600));
         continue;
       }
       throw lastErr;
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw lastErr || new Error('Échec après ' + maxAttempts + ' tentatives');
@@ -846,6 +869,77 @@ async function masterApi(action, params={}) {
     });
     return res.json();
   } catch(e) { console.warn('masterApi:', e.message); return null; }
+}
+
+// ══ CACHE LOCAL + PRÉFETCH : ouverture quasi instantanée ═════════════════════
+// Le dernier état connu est gardé dans localStorage : au démarrage, l'app
+// s'affiche immédiatement avec ces données puis se met à jour en silence.
+const CACHE_PREFIX = 'tc_cache_';
+const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 h max
+let PREFETCH = null; // promesse bootstrap lancée en avance (login / ouverture)
+
+function cacheKey() {
+  return CACHE_PREFIX + (sessionStorage.getItem('tc_nom') || 'default');
+}
+function saveCache(data) {
+  try { localStorage.setItem(cacheKey(), JSON.stringify({ t: Date.now(), data })); } catch (e) {}
+}
+function loadCache() {
+  try {
+    const raw = localStorage.getItem(cacheKey());
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.t || Date.now() - parsed.t > CACHE_TTL || !parsed.data) return null;
+    return parsed.data;
+  } catch (e) { return null; }
+}
+function clearCache() {
+  try {
+    Object.keys(localStorage).filter(k => k.indexOf(CACHE_PREFIX) === 0)
+      .forEach(k => localStorage.removeItem(k));
+  } catch (e) {}
+}
+
+// ⚡ Démarre la requête bootstrap en avance (au login ou à l'ouverture de l'app)
+// Mode "light" : on ne demande QUE l'état de l'onglet d'arrivée → réponse minuscule
+// → affichage quasi immédiat. Les autres onglets sont synchronisés ensuite en
+// arrière-plan (syncStatesInBackground). L'ancien backend (sans ce filtre) ignore
+// le paramètre et renvoie tout : fonctionnement identique à avant, sans casse.
+let INIT_TAB = 'chaud'; // onglet affiché au démarrage
+let FULL_SYNC_STARTED = false; // la synchronisation complète des états a-t-elle démarré ?
+
+function startBootstrapPrefetch() {
+  if (DEMO_MODE || !API_URL || PREFETCH) return;
+  const sheetName = SHEET_NAMES[INIT_TAB];
+  PREFETCH = api('bootstrap', sheetName ? { state: sheetName } : {}).catch(() => null); // échec silencieux : initApp relancera
+}
+
+// 🔄 Synchronisation silencieuse de TOUS les états, en arrière-plan, après
+// l'affichage du 1er onglet. Remplit S.states pour que chaque onglet s'ouvre
+// instantanément ensuite. Ne touche jamais à l'onglet en cours d'affichage.
+async function syncStatesInBackground() {
+  if (FULL_SYNC_STARTED) return;
+  FULL_SYNC_STARTED = true;
+  try {
+    const r = await api('bootstrap');
+    if (!r || !r.ok) return;
+    saveCache(r);
+    // Fusionne les états absents du cache local sans écraser ce qui est affiché
+    Object.keys(r.states || {}).forEach(k => { if (!S.states[k]) S.states[k] = r.states[k]; });
+    // Invalide les onglets d'état non visités pour qu'ils relisent le cache frais
+    S.loaded.forEach(t => {
+      if (t !== S.tab && (SHEET_NAMES[t] || t === 'biannuel' || t.startsWith('app_'))) S.loaded.delete(t);
+    });
+  } catch (e) { /* silencieux : les onglets se chargeront à la demande */ }
+}
+
+// Onglet dont l'état manque encore ? → sera chargé à la demande par loadAndRender
+function pendingStateTab(tab) {
+  if (!BOOTSTRAP_OK) return null;
+  if (SHEET_NAMES[tab]) return SHEET_NAMES[tab];
+  if (tab === 'biannuel') return 'Fréquences Bi-Annuelles';
+  if (tab && tab.startsWith('app_')) return 'App_' + tab.slice(4);
+  return null;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1246,12 +1340,64 @@ function startDemoSession(){
 // ════════════════════════════════════════════════════════════════════
 //  INIT APP (appelé après login réussi)
 // ════════════════════════════════════════════════════════════════════
+function applyBootstrap(r, opts = {}) {
+  const firstRender = S.loaded.size === 0;
+  document.getElementById('conn-status').textContent = '✅';
+  document.getElementById('conn-status').style.background = 'rgba(76,175,80,.4)';
+  S.appareils = r.appareils || [];
+  if (r.states) S.states = r.states;
+  // Restaure les commentaires/méta globaux depuis les états
+  Object.keys(SHEET_NAMES).forEach(tab => {
+    const st = S.states[SHEET_NAMES[tab]];
+    if (st && st._comment) S.comments[tab] = st._comment;
+  });
+  updateAppareilsTabs();
+  if (firstRender) {
+    document.querySelectorAll('#tabs-bar .tab').forEach(t => t.classList.toggle('active', t.getAttribute('data-tab')===INIT_TAB));
+    const defItem = document.querySelector('.sidebar-item[data-tab="'+INIT_TAB+'"]');
+    if (defItem) defItem.classList.add('active');
+    loadAndRender(INIT_TAB); // ⚡ affiche l'onglet d'arrivée IMMÉDIATEMENT
+  } else if (opts.refresh) {
+    // Refresh arrière-plan : invalide les autres onglets d'état
+    // (relecture au prochain clic). L'onglet affiché reste intact pour ne pas
+    // écraser une saisie en cours.
+    S.loaded.forEach(t => {
+      if (t !== S.tab && (SHEET_NAMES[t] || t === 'biannuel' || t.startsWith('app_'))) S.loaded.delete(t);
+    });
+  }
+}
+
+// Refresh silencieux après un affichage depuis le cache
+async function refreshInBackground() {
+  try {
+    const r = await api('bootstrap');
+    if (r && r.ok) {
+      connRetryCount = 0;
+      saveCache(r);
+      applyBootstrap(r, { refresh: true });
+      toast('✅ Données à jour');
+    }
+  } catch (e) { /* silencieux : le cache reste affiché */ }
+}
+
 async function initApp() {
   const c = document.getElementById('main-content');
-  c.innerHTML = '<div class="loading"><div class="spinner"></div><span>Connexion...</span></div>';
+  c.innerHTML = '<div class="loading"><div class="spinner"></div><span id="api-status">Connexion...</span></div>';
   try {
-    // ⚡ Bootstrap : ping + appareils + TOUS les états en UNE seule requête
-    let r = await api('bootstrap');
+    // ⚡ 1) Une réponse bootstrap est déjà en vol (préfetch au login / ouverture) ?
+    let r = null;
+    if (PREFETCH) { r = await PREFETCH; PREFETCH = null; }
+    // ⚡ 2) Sinon : affichage instantané depuis le cache local + refresh arrière-plan
+    if (!r || !r.ok) {
+      const cached = loadCache();
+      if (cached && cached.ok) {
+        FULL_SYNC_STARTED = false; // le refresh va relancer la sync complète
+        applyBootstrap(cached);
+        refreshInBackground();
+        return;
+      }
+    }
+    if (!r) r = await api('bootstrap', SHEET_NAMES[INIT_TAB] ? { state: SHEET_NAMES[INIT_TAB] } : {});
     if (!r.ok && String(r.error || '').indexOf('bootstrap') !== -1) {
       // Ancien backend pas encore redéployé → mode compatible (requêtes séparées)
       BOOTSTRAP_OK = false;
@@ -1262,28 +1408,53 @@ async function initApp() {
       }
     }
     if (!r.ok) { showConnError(r.error); return; }
-    document.getElementById('conn-status').textContent = '✅';
-    document.getElementById('conn-status').style.background = 'rgba(76,175,80,.4)';
-    S.appareils = r.appareils || [];
-    S.states = r.states || {};
-    // Restaure les commentaires/méta globaux depuis les états
-    Object.keys(SHEET_NAMES).forEach(tab => {
-      const st = S.states[SHEET_NAMES[tab]];
-      if (st && st._comment) S.comments[tab] = st._comment;
-    });
-    updateAppareilsTabs();
-    document.querySelectorAll('#tabs-bar .tab').forEach(t => t.classList.toggle('active', t.getAttribute('data-tab')==='chaud'));
-    const defItem = document.querySelector('.sidebar-item[data-tab="chaud"]');
-    if (defItem) defItem.classList.add('active');
-    loadAndRender('chaud');
+    connRetryCount = 0; // succès → réinitialise le compteur d'échecs consécutifs
+    if (BOOTSTRAP_OK && r.states) saveCache(r);
+    applyBootstrap(r);
+    // ⚡ Réponse légère (1 seul état) → on récupère les autres en silence
+    if (BOOTSTRAP_OK && Object.keys(r.states || {}).length < 4) syncStatesInBackground();
   } catch(e) { showConnError(e.message); }
 }
 
+let connRetryTimer = null;
+let connRetryCount = 0; // nombre d'échecs consécutifs de initApp
+
+// Écran d'erreur + auto-retry : au lieu d'un cul-de-sac, on réessaie tout seul
+// toutes les 10 s (jusqu'à 3 fois), puis on laisse un bouton "Réessayer".
 function showConnError(msg) {
   document.getElementById('conn-status').textContent = '❌';
   document.getElementById('conn-status').style.background = 'rgba(244,67,54,.4)';
+  connRetryCount++;
+  const MAX_AUTO = 3, WAIT_S = 10;
+  let remaining = WAIT_S;
   document.getElementById('main-content').innerHTML =
-    `<div style="padding:30px;color:#c62828;"><strong>❌ Impossible de joindre Google Sheets</strong><br><br>${msg}</div>`;
+    `<div style="padding:30px;color:#c62828;text-align:center;">
+      <strong>❌ Impossible de joindre Google Sheets</strong><br><br>
+      <span style="color:#555;font-size:13px">${esc(msg)}</span><br><br>
+      <div id="conn-retry-info" style="color:#555">🔄 Nouvelle tentative automatique dans <strong id="conn-count">${WAIT_S}</strong> s…</div>
+      <button class="btn" id="btn-conn-retry" style="margin-top:12px">🔄 Réessayer maintenant</button>
+    </div>`;
+  document.getElementById('btn-conn-retry').onclick = () => {
+    if (connRetryTimer) { clearInterval(connRetryTimer); connRetryTimer = null; }
+    connRetryCount = 0;
+    initApp();
+  };
+  if (connRetryCount <= MAX_AUTO) {
+    if (connRetryTimer) clearInterval(connRetryTimer);
+    connRetryTimer = setInterval(() => {
+      const el = document.getElementById('conn-count');
+      if (!el) { clearInterval(connRetryTimer); connRetryTimer = null; return; }
+      remaining--;
+      el.textContent = remaining;
+      if (remaining <= 0) {
+        clearInterval(connRetryTimer); connRetryTimer = null;
+        setApiStatus('Nouvelle tentative…');
+        initApp();
+      }
+    }, 1000);
+  } else {
+    document.getElementById('conn-retry-info').textContent = '⚠️ Plusieurs tentatives ont échoué. Vérifiez votre connexion Internet puis cliquez sur le bouton ci-dessous.';
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1329,6 +1500,8 @@ function updateAppareilsTabs() {
 
 function switchTab(tab, el) {
   S.tab = tab;
+  // Mémorise le dernier onglet d'état visité → l'app rouvrira dessus
+  if (pendingStateTab(tab)) { try { sessionStorage.setItem('tc_last_tab', tab); } catch (e) {} }
   document.querySelectorAll('#tabs-bar .tab').forEach(t => t.classList.toggle('active', t.getAttribute('data-tab')===tab));
   document.querySelectorAll('.sidebar-item').forEach(i => {
     const t = i.getAttribute('data-tab') || (i.getAttribute('data-app-id') ? 'app_'+i.getAttribute('data-app-id') : null);
@@ -1342,8 +1515,20 @@ function switchTab(tab, el) {
 
 async function loadAndRender(tab) {
   const c = document.getElementById('main-content');
-  c.innerHTML = '<div class="loading"><div class="spinner"></div><span>Chargement...</span></div>';
+  c.innerHTML = '<div class="loading"><div class="spinner"></div><span id="api-status">Chargement...</span></div>';
   try {
+    // Sécurité : l'état de cet onglet n'a pas encore été synchronisé en arrière-plan
+    // (syncStatesInBackground pas terminée) → chargement à la demande, juste lui.
+    const stateKey = pendingStateTab(tab);
+    if (stateKey && S.states[stateKey] === undefined) {
+      try {
+        S.states[stateKey] = (tab === 'biannuel')
+          ? await api('loadBiannuelState')
+          : (tab.startsWith('app_')
+              ? await api('loadAppareilState', { appareilId: tab.slice(4) })
+              : await api('loadHebdoState', { sheetName: stateKey }));
+      } catch (e) { /* réseau : le rendu continuera avec ce qui est disponible */ }
+    }
     if (tab==='biannuel') { if (BOOTSTRAP_OK) { applyState('biannuel', S.states['Fréquences Bi-Annuelles'] || {}); } else { const st=await api('loadBiannuelState'); applyState('biannuel',st); } }
     else if (tab==='prelevements') { const r=await api('loadPrelevements'); S.prelevements=r.rows||[]; }
     else if (tab==='pesees') { const r=await api('loadPesees'); S.pesees=r.rows||[]; }
@@ -1431,7 +1616,7 @@ function highlightTodayTempColumns(){
 // ════════════════════════════════════════════════════════════════════
 async function loadElog() {
   const c = document.getElementById('main-content');
-  c.innerHTML = '<div class="loading"><div class="spinner"></div><span>Chargement du journal…</span></div>';
+  c.innerHTML = '<div class="loading"><div class="spinner"></div><span id="api-status">Chargement du journal…</span></div>';
   try {
     const r = await masterApi('getLogs', { limit: 300 });
     elogRows = (r && r.ok) ? (r.rows || []) : [];
