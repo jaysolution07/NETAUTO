@@ -20,6 +20,7 @@
   }]
 }">
 <meta name="theme-color" content="#1B6B7B">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="TempClean">
@@ -583,6 +584,8 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f4f8;color:#333;font-
 // ════════════════════════════════════════════════════════════════════
 
 const MASTER_API_URL = 'https://script.google.com/macros/s/AKfycbysG2pctGrrGyAcCLAZtOl2RmLUAj6S6cAqK9gJPrbPA9boz51fo2Umy_yo3ydVEWw-/exec';
+// URL directe d'une Web App (fallback si la feuille MASTER ne fournit pas de WEBAPPURL)
+const DIRECT_API_URL = '';
 const DEMO_MODE = false;
 const DEMO_COMPANY_NAME = 'TempClean Demo Investors';
 
@@ -657,7 +660,7 @@ async function doLogin() {
   btn.classList.add('loading');
 
   try {
-    const res = await fetch(MASTER_API_URL, {
+    const res = await fetchWithRetry(MASTER_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify({ action: 'login', id, mdp })
@@ -782,13 +785,16 @@ async function api(action, params = {}) {
   }
 
   try {
-    const res = await fetch(API_URL, {
+    const res = await fetchWithRetry(API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify({ action, ...params })
     });
 
     if (!res.ok) {
+      if (res.status === 404) {
+        throw new Error('HTTP 404 après plusieurs tentatives — Google Apps Script a un raté temporaire (réessayez dans quelques secondes), ou la colonne WEBAPPURL de la feuille MASTER est incorrecte.');
+      }
       throw new Error('HTTP ' + res.status);
     }
 
@@ -800,11 +806,40 @@ async function api(action, params = {}) {
   }
 }
 
+// 🔄 Retry automatique : les /exec Apps Script renvoient parfois des 404/500
+// transitoires (flakiness connue de Google). On réessaie jusqu'à 3 fois avec
+// un backoff croissant. Sans risque même pour les écritures : le backend lit
+// la DERNIÈRE valeur de chaque clé, donc un doublon d'écriture est inoffensif.
+async function fetchWithRetry(url, options, maxAttempts = 3) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      const transient = res.status === 404 || res.status === 429 || res.status >= 500;
+      if (transient && attempt < maxAttempts) {
+        console.warn(`API transitoire HTTP ${res.status}, nouvelle tentative ${attempt + 1}/${maxAttempts}…`);
+        await new Promise(r => setTimeout(r, 700 * attempt + Math.random() * 400));
+        continue;
+      }
+      return res;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < maxAttempts) {
+        console.warn(`Réseau indisponible (tentative ${attempt}/${maxAttempts}), réessai…`, e.message);
+        await new Promise(r => setTimeout(r, 700 * attempt + Math.random() * 400));
+        continue;
+      }
+      throw lastErr;
+    }
+  }
+  throw lastErr || new Error('Échec après ' + maxAttempts + ' tentatives');
+}
+
 async function masterApi(action, params={}) {
   if (DEMO_MODE) return demoMasterApi(action, params);
   if (!MASTER_API_URL) return null;
   try {
-    const res = await fetch(MASTER_API_URL, {
+    const res = await fetchWithRetry(MASTER_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify({ action, ...params })
@@ -885,12 +920,14 @@ const FREEZER_LEVEL_COUNT = 3;
 
 const S = {
   tab:'chaud', checks:{}, appChecks:{}, comments:{}, meta:{},
+  states:{}, // cache de tous les états chargés en 1 requête au démarrage (bootstrap)
   appareils:[], renaming:{}, loaded:new Set(),
   prelevements:[], pesees:[], machines:[], maintenanceRows:[], maintenanceMachineId:'',
   editingReleve:null, editingPesee:null, editingMaintenance:null, editingFreezerId:null,
   freezerItems:[], freezerMeta:{dateDebut:'',dateFin:'',filtreRack:''}, freezerDraft:{produit:'',placements:[]}, freezerSearch:''
 };
 let elogRows = [];
+let BOOTSTRAP_OK = true; // false si le backend ne connaît pas encore l'action 'bootstrap'
 
 function deepClone(obj){ return JSON.parse(JSON.stringify(obj)); }
 function demoUnique(arr){ return [...new Set(arr.filter(n => n >= 1 && n <= 31))].sort((a,b)=>a-b); }
@@ -1213,15 +1250,27 @@ async function initApp() {
   const c = document.getElementById('main-content');
   c.innerHTML = '<div class="loading"><div class="spinner"></div><span>Connexion...</span></div>';
   try {
-    const r = await api('ping');
-    if (r.ok) {
-      document.getElementById('conn-status').textContent = '✅';
-      document.getElementById('conn-status').style.background = 'rgba(76,175,80,.4)';
-    } else { showConnError(r.error); return; }
-    const data = await api('getAppData');
-    S.appareils = data.appareils || [];
-    S.comments = { ...S.comments, ...(data.comments || {}) };
-    S.meta = { ...S.meta, ...(data.meta || {}) };
+    // ⚡ Bootstrap : ping + appareils + TOUS les états en UNE seule requête
+    let r = await api('bootstrap');
+    if (!r.ok && String(r.error || '').indexOf('bootstrap') !== -1) {
+      // Ancien backend pas encore redéployé → mode compatible (requêtes séparées)
+      BOOTSTRAP_OK = false;
+      r = await api('ping');
+      if (r.ok) {
+        const d = await api('getAppData');
+        r = { ok: true, appareils: d.appareils || [], states: {} };
+      }
+    }
+    if (!r.ok) { showConnError(r.error); return; }
+    document.getElementById('conn-status').textContent = '✅';
+    document.getElementById('conn-status').style.background = 'rgba(76,175,80,.4)';
+    S.appareils = r.appareils || [];
+    S.states = r.states || {};
+    // Restaure les commentaires/méta globaux depuis les états
+    Object.keys(SHEET_NAMES).forEach(tab => {
+      const st = S.states[SHEET_NAMES[tab]];
+      if (st && st._comment) S.comments[tab] = st._comment;
+    });
     updateAppareilsTabs();
     document.querySelectorAll('#tabs-bar .tab').forEach(t => t.classList.toggle('active', t.getAttribute('data-tab')==='chaud'));
     const defItem = document.querySelector('.sidebar-item[data-tab="chaud"]');
@@ -1295,7 +1344,7 @@ async function loadAndRender(tab) {
   const c = document.getElementById('main-content');
   c.innerHTML = '<div class="loading"><div class="spinner"></div><span>Chargement...</span></div>';
   try {
-    if (tab==='biannuel') { const st=await api('loadBiannuelState'); applyState('biannuel',st); }
+    if (tab==='biannuel') { if (BOOTSTRAP_OK) { applyState('biannuel', S.states['Fréquences Bi-Annuelles'] || {}); } else { const st=await api('loadBiannuelState'); applyState('biannuel',st); } }
     else if (tab==='prelevements') { const r=await api('loadPrelevements'); S.prelevements=r.rows||[]; }
     else if (tab==='pesees') { const r=await api('loadPesees'); S.pesees=r.rows||[]; }
     else if (tab==='maintenance') {
@@ -1311,10 +1360,11 @@ async function loadAndRender(tab) {
     }
     else if (tab.startsWith('app_')) {
       const id=tab.replace('app_','');
-      const st=await api('loadAppareilState',{appareilId:id});
+      const st=BOOTSTRAP_OK ? (S.states['App_'+id] || {}) : await api('loadAppareilState',{appareilId:id});
       S.appChecks[id]={};
       Object.entries(st||{}).forEach(([k,v])=>{ S.appChecks[id][k]=v===true||v==='TRUE'; });
-    } else { const st=await api('loadHebdoState',{sheetName:SHEET_NAMES[tab]}); applyState(tab,st); }
+    } else if (BOOTSTRAP_OK) { applyState(tab, S.states[SHEET_NAMES[tab]] || {}); }
+    else { const st=await api('loadHebdoState',{sheetName:SHEET_NAMES[tab]}); applyState(tab,st); }
     S.loaded.add(tab);
   } catch(e) { toast('⚠️ Chargement partiel: '+e.message,true); }
   renderTab(tab);
@@ -2411,27 +2461,27 @@ async function tick(tabId,itemName,itemIdx,day,val){
   if(!S.checks[tabId])S.checks[tabId]={};
   const stateKey=itemName==='BIO'?'BIO__'+day:'i'+itemIdx+'__'+day;
   const backendKey=itemName==='BIO'?'BIO':'i'+itemIdx;
-  S.checks[tabId][stateKey]=val;updateProg(tabId);toast(val?'✅ Coché':'☐ Décoché');
+  S.checks[tabId][stateKey]=val;if(S.states[SHEET_NAMES[tabId]])S.states[SHEET_NAMES[tabId]][backendKey]=val;updateProg(tabId);toast(val?'✅ Coché':'☐ Décoché');
   try{const r=await api('saveHebdo',{sheetName:SHEET_NAMES[tabId],itemName:backendKey,day,value:val});if(r&&!r.ok)toast('⚠️ '+r.error,true);}catch(e){toast('❌ '+e.message,true);}
 }
 async function tickBi(itemIdx,monthIndex,val){
   if(!S.checks['biannuel'])S.checks['biannuel']={};
   const stateKey=itemIdx===-1?'BIO__'+monthIndex:'i'+itemIdx+'__'+monthIndex;
   const backendKey=itemIdx===-1?'BIO':'i'+itemIdx;
-  S.checks['biannuel'][stateKey]=val;toast(val?'✅ Coché':'☐ Décoché');
+  S.checks['biannuel'][stateKey]=val;if(S.states['Fréquences Bi-Annuelles'])S.states['Fréquences Bi-Annuelles'][backendKey]=val;toast(val?'✅ Coché':'☐ Décoché');
   try{const r=await api('saveBiannuel',{itemName:backendKey,monthIndex,value:val});if(r&&!r.ok)toast('⚠️ '+r.error,true);}catch(e){toast('❌ '+e.message,true);}
 }
 async function tickApp(appId,tempVal,day,slot,val){
   if(!S.appChecks[appId])S.appChecks[appId]={};
   const ck=slot?`${tempVal}__${day}__${slot}`:`${tempVal}__${day}`;
-  S.appChecks[appId][ck]=val;toast(val?'✅':'☐');
+  S.appChecks[appId][ck]=val;if(S.states['App_'+appId])S.states['App_'+appId][ck]=val;toast(val?'✅':'☐');
   try{const r=await api('saveAppareilTemp',{appareilId:appId,tempVal,day,slot,value:val});if(r&&!r.ok)toast('⚠️ '+r.error,true);}catch(e){toast('❌ '+e.message,true);}
 }
 function togglePh(cb,inputId){const el=document.getElementById(inputId);if(!el)return;el.style.display=cb.checked?'':'none';if(!cb.checked)el.value='';}
-async function savePh(tabId,idx,day,val){const key='ph__i'+idx+'__'+day;if(!S.checks[tabId])S.checks[tabId]={};S.checks[tabId][key]=val;try{await api('saveHebdo',{sheetName:SHEET_NAMES[tabId],itemName:'ph__i'+idx,day,value:val});}catch(e){toast('❌ '+e.message,true);}}
-async function saveComment(tabId){const el=document.getElementById('cmt-'+tabId);if(!el)return;S.comments[tabId]=el.value;const sn=tabId==='biannuel'?'Fréquences Bi-Annuelles':SHEET_NAMES[tabId];try{await api('saveComment',{sheetName:sn,comment:el.value});toast('💾 Commentaire enregistré');}catch(e){toast('❌ '+e.message,true);}}
-async function saveAppComment(appId){const el=document.getElementById('cmt-app-'+appId);if(!el)return;S.comments['app_'+appId]=el.value;try{await api('saveAppareilComment',{appareilId:appId,comment:el.value});toast('💾 Enregistré');}catch(e){toast('❌ '+e.message,true);}}
-async function saveAppMeta(appId){const m=document.getElementById('meta-m-'+appId)?.value||'',v=document.getElementById('meta-v-'+appId)?.value||'';S.meta[appId]={moisAnnee:m,visa:v};try{await api('saveAppareilMeta',{appareilId:appId,moisAnnee:m,visa:v});toast('💾 Méta enregistrée');}catch(e){toast('❌ '+e.message,true);}}
+async function savePh(tabId,idx,day,val){const key='ph__i'+idx+'__'+day;if(!S.checks[tabId])S.checks[tabId]={};S.checks[tabId][key]=val;if(S.states[SHEET_NAMES[tabId]])S.states[SHEET_NAMES[tabId]]['ph__i'+idx]=val;try{await api('saveHebdo',{sheetName:SHEET_NAMES[tabId],itemName:'ph__i'+idx,day,value:val});}catch(e){toast('❌ '+e.message,true);}}
+async function saveComment(tabId){const el=document.getElementById('cmt-'+tabId);if(!el)return;S.comments[tabId]=el.value;const sn=tabId==='biannuel'?'Fréquences Bi-Annuelles':SHEET_NAMES[tabId];if(S.states[sn])S.states[sn]._comment=el.value;try{await api('saveComment',{sheetName:sn,comment:el.value});toast('💾 Commentaire enregistré');}catch(e){toast('❌ '+e.message,true);}}
+async function saveAppComment(appId){const el=document.getElementById('cmt-app-'+appId);if(!el)return;S.comments['app_'+appId]=el.value;if(S.states['App_'+appId])S.states['App_'+appId]._comment=el.value;try{await api('saveAppareilComment',{appareilId:appId,comment:el.value});toast('💾 Enregistré');}catch(e){toast('❌ '+e.message,true);}}
+async function saveAppMeta(appId){const m=document.getElementById('meta-m-'+appId)?.value||'',v=document.getElementById('meta-v-'+appId)?.value||'';S.meta[appId]={moisAnnee:m,visa:v};if(S.states['App_'+appId]){S.states['App_'+appId]._month=m;S.states['App_'+appId]._visa=v;}try{await api('saveAppareilMeta',{appareilId:appId,moisAnnee:m,visa:v});toast('💾 Méta enregistrée');}catch(e){toast('❌ '+e.message,true);}}
 async function ajouterAppareil(){const nom=document.getElementById('new-nom').value.trim(),type=document.getElementById('new-type').value;if(!nom){toast('⚠️ Entrez un nom',true);return;}try{const app=await api('addAppareil',{nom,type});S.appareils.push(app);document.getElementById('new-nom').value='';updateAppareilsTabs();renderTab('temp-manager');toast('✅ '+app.nom+' créé !');}catch(e){toast('❌ '+e.message,true);}}
 async function dupApp(id){try{const app=await api('dupliquerAppareil',{sourceId:id});S.appareils.push(app);updateAppareilsTabs();renderTab('temp-manager');toast('✅ Dupliqué : '+app.nom);}catch(e){toast('❌ '+e.message,true);}}
 function startRen(id){S.renaming[id]=true;renderTab('temp-manager');setTimeout(()=>document.getElementById('ren-'+id)?.focus(),50);}
@@ -2501,7 +2551,7 @@ async function confirmerClotureBi(){
   try{
     genererPdfBiannuel(label);const r=await api('cloturerBiannuel',{label});
     const res=document.getElementById('cloture-bi-result');res.style.display='block';
-    if(r.ok){res.style.background='#E8F5E9';res.style.color='#2E7D32';res.innerHTML='✅ PDF ouvert — sauvegardez-le. Données remises à zéro !';btn.textContent='✓ Terminé';S.checks['biannuel']={};S.comments['biannuel']='';S.loaded.delete('biannuel');setTimeout(()=>{document.getElementById('modal-cloture-bi').style.display='none';if(S.tab==='biannuel')loadAndRender('biannuel');},1500);}
+    if(r.ok){res.style.background='#E8F5E9';res.style.color='#2E7D32';res.innerHTML='✅ PDF ouvert — sauvegardez-le. Données remises à zéro !';btn.textContent='✓ Terminé';S.checks['biannuel']={};S.comments['biannuel']='';if(S.states['Fréquences Bi-Annuelles'])S.states['Fréquences Bi-Annuelles']={};S.loaded.delete('biannuel');setTimeout(()=>{document.getElementById('modal-cloture-bi').style.display='none';if(S.tab==='biannuel')loadAndRender('biannuel');},1500);}
     else{res.style.background='#FFEBEE';res.style.color='#C62828';res.innerHTML='❌ '+r.error;btn.disabled=false;btn.textContent='📤 Réessayer';}
   }catch(e){toast('❌ '+e.message,true);document.getElementById('btn-cloturer-bi').disabled=false;document.getElementById('btn-cloturer-bi').textContent='📤 Réessayer';}
 }
@@ -2526,7 +2576,7 @@ async function confirmerCloture(){
     if(r.ok){
       res.style.background='#E8F5E9';res.style.color='#2E7D32';res.innerHTML='<strong>✅ Clôture réussie !</strong><br>📄 Sauvegardez le PDF depuis la fenêtre d\'impression.';btn.textContent='✓ Terminé';
       await masterApi('logEvent',{event:'CLOTURE',detail:label,id:'',nom:document.getElementById('ss-name').textContent||''});
-      S.loaded.clear();S.checks={};S.appChecks={};S.comments={};S.meta={};
+      S.loaded.clear();S.checks={};S.appChecks={};S.comments={};S.meta={};S.states={};
       setTimeout(()=>{closeCloture();loadAndRender('chaud');document.querySelectorAll('#tabs-bar .tab').forEach(t=>t.classList.toggle('active',t.getAttribute('data-tab')==='chaud'));document.querySelectorAll('.sidebar-item').forEach(i=>i.classList.toggle('active',i.getAttribute('data-tab')==='chaud'));S.tab='chaud';},1500);
     }else{res.style.background='#FFEBEE';res.style.color='#C62828';res.innerHTML='⚠️ '+(r.error||'Erreur');btn.disabled=false;btn.textContent='📤 Réessayer';}
   }catch(e){res.style.display='block';res.style.background='#FFEBEE';res.style.color='#C62828';res.innerHTML='❌ '+e.message;btn.disabled=false;btn.textContent='📤 Réessayer';}
