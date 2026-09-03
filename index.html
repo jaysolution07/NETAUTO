@@ -1711,6 +1711,15 @@ async function clearElog() {
 // ════════════════════════════════════════════════════════════════════
 //  PRÉLÈVEMENTS
 // ════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════
+//  ENVOI OPTIMISTE — l'écran réagit IMMÉDIATEMENT (ajout / modif /
+//  suppression), Google Sheets est synchronisé en arrière-plan, et en
+//  cas d'échec réel l'état local est restauré (rollback automatique).
+// ════════════════════════════════════════════════════════════════════
+let tempRowSeq = 0; // id local négatif temporaire (remplacé par l'id réel du serveur à la confirmation)
+function rowIdxById(list,id){return list.findIndex(r=>String(r._rowIndex)===String(id));}
+function rerenderListIfActive(tab){if(S.tab===tab)renderTab(tab);}
+
 function buildPrelevements() {
   const rows=S.prelevements;
   const alertRows=rows.filter(r=>{const j=parseFloat(r.resJaune),ro=parseFloat(r.resRouge);return(j>=25)||(ro>=1);});
@@ -1772,7 +1781,8 @@ function buildPrelevEditRow(row,idx){
 async function addPrelevement(){
   const date=document.getElementById('p-date').value,operateur=document.getElementById('p-operateur').value.trim(),surface=document.getElementById('p-surface').value.trim(),resJaune=document.getElementById('p-jaune').value,resRouge=document.getElementById('p-rouge').value,actionsCor=document.getElementById('p-actions').value.trim();
   if(!date||!surface){toast('⚠️ Date et Surface obligatoires',true);return;}
-  try{const r=await api('addPrelevement',{date,operateur,surface,resJaune,resRouge,actionsCor});if(!r.ok){toast('❌ '+r.error,true);return;}S.prelevements.push({_rowIndex:r._rowIndex,date,operateur,surface,resJaune,resRouge,actionsCor});S.loaded.delete('prelevements');clearFormPrelev();renderTab('prelevements');toast('✅ Prélèvement enregistré');}catch(e){toast('❌ '+e.message,true);}
+  const id=-(++tempRowSeq);S.prelevements.push({_rowIndex:id,date,operateur,surface,resJaune,resRouge,actionsCor});renderTab('prelevements'); // ⚡ affichage immédiat, envoi en arrière-plan
+  try{const r=await api('addPrelevement',{date,operateur,surface,resJaune,resRouge,actionsCor});if(!r||!r.ok)throw new Error((r&&r.error)||'Erreur serveur');const i=rowIdxById(S.prelevements,id);if(i>=0)S.prelevements[i]._rowIndex=r._rowIndex;else{try{await api('deletePrelevement',{_rowIndex:r._rowIndex});}catch(_){}}toast('✅ Prélèvement enregistré');}catch(e){const i=rowIdxById(S.prelevements,id);if(i>=0)S.prelevements.splice(i,1);rerenderListIfActive('prelevements');toast('❌ Enregistrement impossible : '+e.message,true);}
 }
 function clearFormPrelev(){['p-operateur','p-surface','p-jaune','p-rouge','p-actions'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';})}
 function startEditPrelev(idx){S.editingReleve=idx;renderTab('prelevements');}
@@ -1780,11 +1790,14 @@ function cancelEditPrelev(){S.editingReleve=null;renderTab('prelevements');}
 async function saveEditPrelev(idx){
   const row=S.prelevements[idx];
   const updated={_rowIndex:row._rowIndex,date:document.getElementById('edit-p-date-'+idx).value,operateur:document.getElementById('edit-p-op-'+idx).value.trim(),surface:document.getElementById('edit-p-surf-'+idx).value.trim(),resJaune:document.getElementById('edit-p-j-'+idx).value,resRouge:document.getElementById('edit-p-r-'+idx).value,actionsCor:document.getElementById('edit-p-act-'+idx).value.trim()};
-  try{const r=await api('updatePrelevement',updated);if(!r.ok){toast('❌ '+r.error,true);return;}S.prelevements[idx]=updated;S.editingReleve=null;renderTab('prelevements');toast('✅ Mis à jour');}catch(e){toast('❌ '+e.message,true);}
+  const prev={...row};S.prelevements[idx]=updated;S.editingReleve=null;renderTab('prelevements'); // ⚡ modification affichée immédiatement
+  try{const r=await api('updatePrelevement',updated);if(!r||!r.ok)throw new Error((r&&r.error)||'Erreur serveur');toast('✅ Mis à jour');}catch(e){const i=S.prelevements.indexOf(updated);if(i>=0)S.prelevements[i]=prev;rerenderListIfActive('prelevements');toast('❌ Sauvegarde impossible : '+e.message,true);}
 }
 async function deletePrelevement(idx){
   if(!confirm('Supprimer ce prélèvement ?'))return;const row=S.prelevements[idx];
-  try{const r=await api('deletePrelevement',{_rowIndex:row._rowIndex});if(!r.ok){toast('❌ '+r.error,true);return;}S.prelevements.splice(idx,1);S.loaded.delete('prelevements');renderTab('prelevements');toast('🗑 Supprimé');}catch(e){toast('❌ '+e.message,true);}
+  const pos=idx;S.prelevements.splice(idx,1);renderTab('prelevements'); // ⚡ suppression immédiate
+  if(Number(row._rowIndex)<0){toast('🗑 Supprimé');return;} // ligne pas encore confirmée → rien à supprimer côté serveur
+  try{const r=await api('deletePrelevement',{_rowIndex:row._rowIndex});if(!r||!r.ok)throw new Error((r&&r.error)||'Erreur serveur');toast('🗑 Supprimé');}catch(e){if(S.prelevements.indexOf(row)<0)S.prelevements.splice(Math.min(pos,S.prelevements.length),0,row);rerenderListIfActive('prelevements');toast('❌ Suppression impossible : '+e.message,true);}
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1833,18 +1846,22 @@ function buildPeseeEditRow(row,idx){
 async function addPesee(){
   const date=document.getElementById('pe-date').value,produit=document.getElementById('pe-produit').value.trim(),poidsTheorique=document.getElementById('pe-theorique').value,poidsReel1=document.getElementById('pe-reel1').value,poidsReel2=document.getElementById('pe-reel2').value,poidsReel3=document.getElementById('pe-reel3').value,actions=document.getElementById('pe-actions').value.trim(),visa=document.getElementById('pe-visa').value.trim();
   if(!date||!produit){toast('⚠️ Date et Produit obligatoires',true);return;}
-  try{const r=await api('addPesee',{date,produit,poidsTheorique,poidsReel1,poidsReel2,poidsReel3,actions,visa});if(!r.ok){toast('❌ '+r.error,true);return;}S.pesees.push({_rowIndex:r._rowIndex,date,produit,poidsTheorique,poidsReel1,poidsReel2,poidsReel3,actions,visa});clearFormPesee();renderTab('pesees');toast('✅ Pesée enregistrée');}catch(e){toast('❌ '+e.message,true);}
+  const id=-(++tempRowSeq);S.pesees.push({_rowIndex:id,date,produit,poidsTheorique,poidsReel1,poidsReel2,poidsReel3,actions,visa});renderTab('pesees'); // ⚡ affichage immédiat, envoi en arrière-plan
+  try{const r=await api('addPesee',{date,produit,poidsTheorique,poidsReel1,poidsReel2,poidsReel3,actions,visa});if(!r||!r.ok)throw new Error((r&&r.error)||'Erreur serveur');const i=rowIdxById(S.pesees,id);if(i>=0)S.pesees[i]._rowIndex=r._rowIndex;else{try{await api('deletePesee',{_rowIndex:r._rowIndex});}catch(_){}}toast('✅ Pesée enregistrée');}catch(e){const i=rowIdxById(S.pesees,id);if(i>=0)S.pesees.splice(i,1);rerenderListIfActive('pesees');toast('❌ Enregistrement impossible : '+e.message,true);}
 }
 function clearFormPesee(){['pe-produit','pe-theorique','pe-reel1','pe-reel2','pe-reel3','pe-actions','pe-visa'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';})}
 function startEditPesee(idx){S.editingPesee=idx;renderTab('pesees');}
 function cancelEditPesee(){S.editingPesee=null;renderTab('pesees');}
 async function saveEditPesee(idx){
   const row=S.pesees[idx],updated={_rowIndex:row._rowIndex,date:document.getElementById('edit-pe-date-'+idx).value,produit:document.getElementById('edit-pe-prod-'+idx).value.trim(),poidsTheorique:document.getElementById('edit-pe-th-'+idx).value,poidsReel1:document.getElementById('edit-pe-r1-'+idx).value,poidsReel2:document.getElementById('edit-pe-r2-'+idx).value,poidsReel3:document.getElementById('edit-pe-r3-'+idx).value,actions:document.getElementById('edit-pe-act-'+idx).value.trim(),visa:document.getElementById('edit-pe-visa-'+idx).value.trim()};
-  try{const r=await api('updatePesee',updated);if(!r.ok){toast('❌ '+r.error,true);return;}S.pesees[idx]=updated;S.editingPesee=null;renderTab('pesees');toast('✅ Mis à jour');}catch(e){toast('❌ '+e.message,true);}
+  const prev={...row};S.pesees[idx]=updated;S.editingPesee=null;renderTab('pesees'); // ⚡ modification affichée immédiatement
+  try{const r=await api('updatePesee',updated);if(!r||!r.ok)throw new Error((r&&r.error)||'Erreur serveur');toast('✅ Mis à jour');}catch(e){const i=S.pesees.indexOf(updated);if(i>=0)S.pesees[i]=prev;rerenderListIfActive('pesees');toast('❌ Sauvegarde impossible : '+e.message,true);}
 }
 async function deletePesee(idx){
   if(!confirm('Supprimer cette pesée ?'))return;const row=S.pesees[idx];
-  try{const r=await api('deletePesee',{_rowIndex:row._rowIndex});if(!r.ok){toast('❌ '+r.error,true);return;}S.pesees.splice(idx,1);renderTab('pesees');toast('🗑 Supprimé');}catch(e){toast('❌ '+e.message,true);}
+  const pos=idx;S.pesees.splice(idx,1);renderTab('pesees'); // ⚡ suppression immédiate
+  if(Number(row._rowIndex)<0){toast('🗑 Supprimé');return;} // ligne pas encore confirmée → rien à supprimer côté serveur
+  try{const r=await api('deletePesee',{_rowIndex:row._rowIndex});if(!r||!r.ok)throw new Error((r&&r.error)||'Erreur serveur');toast('🗑 Supprimé');}catch(e){if(S.pesees.indexOf(row)<0)S.pesees.splice(Math.min(pos,S.pesees.length),0,row);rerenderListIfActive('pesees');toast('❌ Suppression impossible : '+e.message,true);}
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1975,13 +1992,24 @@ async function addMachineUi(){
 
   if(!nom) return toast('Nom obligatoire', true);
 
-  const r = await api('addMachine', { nom });
-  if(!r.ok) return toast('❌ ' + r.error, true);
-
+  const seq = ++tempRowSeq;
+  const machine = { _rowIndex: -seq, id: 'mach_tmp_' + seq, nom: nom, actif: true };
+  S.machines.push(machine);
   input.value = '';
-  S.loaded.delete('maintenance');
-  await loadAndRender('maintenance');
-  toast('✅ Machine ajoutée');
+  renderTab('maintenance'); // ⚡ la machine apparaît immédiatement dans la liste
+  try{
+    const r = await api('addMachine', { nom });
+    if(!r || !r.ok) throw new Error((r && r.error) || 'Erreur serveur');
+    const i = S.machines.indexOf(machine);
+    if(i >= 0){ S.machines[i]._rowIndex = r._rowIndex; S.machines[i].id = r.id; }
+    else { try{ await api('deleteMachine',{ _rowIndex: r._rowIndex }); }catch(_){ /* déjà retirée à l'écran */ } }
+    toast('✅ Machine ajoutée');
+  }catch(e){
+    const i = S.machines.indexOf(machine);
+    if(i >= 0) S.machines.splice(i, 1); // rollback
+    rerenderListIfActive('maintenance');
+    toast('❌ Ajout impossible : ' + e.message, true);
+  }
 }
 
 async function addMaintenanceUi(){
@@ -1994,15 +2022,24 @@ async function addMaintenanceUi(){
   const problemes = document.getElementById('maint-problems').value.trim();
   if(!machineId){toast('Choisis une machine', true);return;}
   if(!dateEntretien){toast('Date entretien obligatoire', true);return;}
+  const row = { _rowIndex: -(++tempRowSeq), machineId: machineId, machineNom: machineNom, dateEntretien: dateEntretien, typeMaintenance: typeMaintenance, entretienRealise: entretienRealise, produitsUtilises: produitsUtilises, problemes: problemes };
+  S.maintenanceRows.push(row);
+  S.maintenanceMachineId = machineId;
+  clearMaintenanceForm();
+  renderTab('maintenance'); // ⚡ le relevé s'affiche immédiatement
   try{
     const r = await api('addMaintenance',{machineId,machineNom,dateEntretien,typeMaintenance,entretienRealise,produitsUtilises,problemes});
-    if(!r.ok){toast('Erreur: '+r.error,true);return;}
-    S.maintenanceMachineId = machineId;
-    clearMaintenanceForm();
-    S.loaded.delete('maintenance');
-    await loadAndRender('maintenance');
+    if(!r || !r.ok) throw new Error((r && r.error) || 'Erreur serveur');
+    const i = rowIdxById(S.maintenanceRows, row._rowIndex);
+    if(i >= 0) S.maintenanceRows[i]._rowIndex = r._rowIndex;
+    else { try{ await api('deleteMaintenance',{ _rowIndex: r._rowIndex }); }catch(_){ /* déjà retiré à l'écran */ } }
     toast('Releve entretien enregistre');
-  }catch(e){toast('Erreur: '+e.message,true);}
+  }catch(e){
+    const i = rowIdxById(S.maintenanceRows, row._rowIndex);
+    if(i >= 0) S.maintenanceRows.splice(i, 1); // rollback
+    rerenderListIfActive('maintenance');
+    toast('Erreur: '+e.message,true);
+  }
 }
 
 function clearMaintenanceForm(){
@@ -2025,25 +2062,41 @@ async function saveEditMaintenance(rowIndex){
     produitsUtilises: document.getElementById('edit-maint-products-'+rowIndex).value.trim(),
     problemes: document.getElementById('edit-maint-problems-'+rowIndex).value.trim()
   };
+  const prev = { ...row };
+  const idx = S.maintenanceRows.indexOf(row);
+  if(idx >= 0) S.maintenanceRows[idx] = payload;
+  S.editingMaintenance = null;
+  renderTab('maintenance'); // ⚡ modification affichée immédiatement
+  if(Number(rowIndex) < 0){ toast('Releve mis a jour'); return; } // ligne pas encore confirmée
   try{
     const r = await api('updateMaintenance', payload);
-    if(!r.ok){toast('Erreur: '+r.error,true);return;}
-    S.editingMaintenance = null;
-    S.loaded.delete('maintenance');
-    await loadAndRender('maintenance');
+    if(!r || !r.ok) throw new Error((r && r.error) || 'Erreur serveur');
     toast('Releve mis a jour');
-  }catch(e){toast('Erreur: '+e.message,true);}
+  }catch(e){
+    const i = S.maintenanceRows.indexOf(payload);
+    if(i >= 0) S.maintenanceRows[i] = prev; // rollback
+    rerenderListIfActive('maintenance');
+    toast('Erreur: '+e.message,true);
+  }
 }
 
 async function deleteMaintenanceUi(rowIndex){
   if(!confirm('Supprimer ce releve entretien ?')) return;
+  const row = S.maintenanceRows.find(r => r._rowIndex===rowIndex);
+  if(!row) return;
+  const pos = S.maintenanceRows.indexOf(row);
+  S.maintenanceRows.splice(pos, 1);
+  renderTab('maintenance'); // ⚡ suppression immédiate
+  if(Number(rowIndex) < 0){ toast('Releve supprime'); return; } // ligne pas encore confirmée
   try{
     const r = await api('deleteMaintenance',{_rowIndex:rowIndex});
-    if(!r.ok){toast('Erreur: '+r.error,true);return;}
-    S.loaded.delete('maintenance');
-    await loadAndRender('maintenance');
+    if(!r || !r.ok) throw new Error((r && r.error) || 'Erreur serveur');
     toast('Releve supprime');
-  }catch(e){toast('Erreur: '+e.message,true);}
+  }catch(e){
+    if(S.maintenanceRows.indexOf(row) < 0) S.maintenanceRows.splice(Math.min(pos, S.maintenanceRows.length), 0, row); // rollback
+    rerenderListIfActive('maintenance');
+    toast('Erreur: '+e.message,true);
+  }
 }
 
 function buildMaintenancePrintHtml(label){
@@ -2808,13 +2861,24 @@ async function addMachineUi(){
 
   if(!nom) return toast('Nom obligatoire', true);
 
-  const r = await api('addMachine', { nom });
-  if(!r.ok) return toast('❌ ' + r.error, true);
-
+  const seq = ++tempRowSeq;
+  const machine = { _rowIndex: -seq, id: 'mach_tmp_' + seq, nom: nom, actif: true };
+  S.machines.push(machine);
   input.value = '';
-  S.loaded.delete('maintenance');
-  await loadAndRender('maintenance');
-  toast('✅ Machine ajoutée');
+  renderTab('maintenance'); // ⚡ la machine apparaît immédiatement dans la liste
+  try{
+    const r = await api('addMachine', { nom });
+    if(!r || !r.ok) throw new Error((r && r.error) || 'Erreur serveur');
+    const i = S.machines.indexOf(machine);
+    if(i >= 0){ S.machines[i]._rowIndex = r._rowIndex; S.machines[i].id = r.id; }
+    else { try{ await api('deleteMachine',{ _rowIndex: r._rowIndex }); }catch(_){ /* déjà retirée à l'écran */ } }
+    toast('✅ Machine ajoutée');
+  }catch(e){
+    const i = S.machines.indexOf(machine);
+    if(i >= 0) S.machines.splice(i, 1); // rollback
+    rerenderListIfActive('maintenance');
+    toast('❌ Ajout impossible : ' + e.message, true);
+  }
 }
 
 async function editMachineUi(id){
@@ -2824,16 +2888,20 @@ async function editMachineUi(id){
   const nom = prompt('Modifier le nom', machine.nom);
   if(!nom || !nom.trim()) return;
 
-  const r = await api('updateMachine',{
-    _rowIndex: machine._rowIndex,
-    nom: nom.trim()
-  });
-
-  if(!r.ok) return toast('❌ '+r.error,true);
-
-  S.loaded.delete('maintenance');
-  await loadAndRender('maintenance');
-  toast('✅ Machine modifiée');
+  const prev = { ...machine };
+  machine.nom = nom.trim();
+  renderTab('maintenance'); // ⚡ nouveau nom affiché immédiatement
+  if(Number(machine._rowIndex) < 0){ toast('✅ Machine modifiée'); return; } // machine pas encore confirmée
+  try{
+    const r = await api('updateMachine',{ _rowIndex: machine._rowIndex, nom: machine.nom });
+    if(!r || !r.ok) throw new Error((r && r.error) || 'Erreur serveur');
+    toast('✅ Machine modifiée');
+  }catch(e){
+    const i = S.machines.indexOf(machine);
+    if(i >= 0 && S.machines[i].nom === nom.trim()) S.machines[i] = prev; // rollback
+    rerenderListIfActive('maintenance');
+    toast('❌ Modif impossible : ' + e.message, true);
+  }
 }
 
 async function deleteMachineUi(id){
@@ -2842,15 +2910,19 @@ async function deleteMachineUi(id){
 
   if(!confirm('Supprimer cette machine ?')) return;
 
-  const r = await api('deleteMachine',{
-    _rowIndex: machine._rowIndex
-  });
-
-  if(!r.ok) return toast('❌ '+r.error,true);
-
-  S.loaded.delete('maintenance');
-  await loadAndRender('maintenance');
-  toast('🗑️ Machine supprimée');
+  const pos = S.machines.indexOf(machine);
+  S.machines.splice(pos, 1);
+  renderTab('maintenance'); // ⚡ suppression immédiate
+  if(Number(machine._rowIndex) < 0){ toast('🗑️ Machine supprimée'); return; } // machine jamais confirmée
+  try{
+    const r = await api('deleteMachine',{ _rowIndex: machine._rowIndex });
+    if(!r || !r.ok) throw new Error((r && r.error) || 'Erreur serveur');
+    toast('🗑️ Machine supprimée');
+  }catch(e){
+    if(S.machines.indexOf(machine) < 0) S.machines.splice(Math.min(pos, S.machines.length), 0, machine); // rollback
+    rerenderListIfActive('maintenance');
+    toast('❌ Suppression impossible : ' + e.message, true);
+  }
 }
 
 </script>
