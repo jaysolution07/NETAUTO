@@ -375,6 +375,13 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#f0f4f8;color:#333;font-
   .alert-banner{display:none!important;}
   @page{size:A4 landscape;margin:6mm;}
 }
+
+/* Bandeau + verrou pendant la synchronisation d'un onglet (chargement optimiste) */
+.hydrate-banner{display:flex;align-items:center;gap:8px;background:#E0F7FA;color:#00695C;font-size:13px;font-weight:600;padding:8px 12px;border-radius:10px;border:1px solid #B2EBF2;margin:8px 2px 2px;}
+.hydrate-banner.hydrate-err{background:#FFEBEE;color:#C62828;border-color:#FFCDD2;flex-wrap:wrap;}
+.hydrate-banner .mini-spin{width:13px;height:13px;border:2px solid rgba(0,105,92,.25);border-top-color:#00695C;border-radius:50%;display:inline-block;animation:tcspin .7s linear infinite;flex:none;}
+@keyframes tcspin{to{transform:rotate(360deg)}}
+.hydrate-lock .cb-wrap,.hydrate-lock input,.hydrate-lock textarea,.hydrate-lock select,.hydrate-lock button{pointer-events:none!important;opacity:.6;}
 </style>
 </head>
 <body>
@@ -671,7 +678,7 @@ async function doLogin() {
     if (data.ok) {
       btn.querySelector('.btn-login-text').textContent = '✅ Connexion réussie…';
       API_URL = data.webappUrl || DIRECT_API_URL;
-      PREFETCH = null; FULL_SYNC_STARTED = false; INIT_TAB = 'chaud'; // nouvelle session → sync à refaire
+      PREFETCH = null; FULL_SYNC_STARTED = false; SESSION_ID = Date.now(); INIT_TAB = 'chaud'; // nouvelle session → sync à refaire
       // Persiste au refresh, effacé à la fermeture de l'onglet/navigateur
       sessionStorage.setItem('tc_api_url', API_URL);
       sessionStorage.setItem('tc_nom', data.nom || id || 'TempClean');
@@ -733,11 +740,18 @@ function showApp(nomEntreprise) {
   }
 
   initApp();
+  startKeepalive(); // garde le script Google éveillé pendant l'utilisation
 }
 
 function logout() {
   if (DEMO_MODE) { toast('Mode demo actif - deconnexion desactivee'); return; }
   if (!confirm('Se déconnecter ?')) return;
+  // Stoppe le keepalive et invalide tout refresh d'arrière-plan en cours
+  if (KEEPALIVE_TIMER) { clearInterval(KEEPALIVE_TIMER); KEEPALIVE_TIMER = null; }
+  SESSION_ID++;
+  BG_REFRESH = null;
+  Object.keys(stateFetchers).forEach(k => delete stateFetchers[k]);
+  Object.keys(recFetchers).forEach(k => delete recFetchers[k]);
   clearCache(); // purge le cache local (sécurité si un autre utilisateur se connecte)
   PREFETCH = null; FULL_SYNC_STARTED = false;
   API_URL = '';
@@ -902,11 +916,12 @@ function clearCache() {
 
 // ⚡ Démarre la requête bootstrap en avance (au login ou à l'ouverture de l'app)
 // Mode "light" : on ne demande QUE l'état de l'onglet d'arrivée → réponse minuscule
-// → affichage quasi immédiat. Les autres onglets sont synchronisés ensuite en
-// arrière-plan (syncStatesInBackground). L'ancien backend (sans ce filtre) ignore
-// le paramètre et renvoie tout : fonctionnement identique à avant, sans casse.
+// → affichage quasi immédiat. Les autres feuilles sont synchronisées ensuite en
+// arrière-plan (scheduleBgRefresh). L'ancien backend (sans ce filtre) ignore le
+// paramètre et renvoie tout : fonctionnement identique à avant, sans casse.
 let INIT_TAB = 'chaud'; // onglet affiché au démarrage
-let FULL_SYNC_STARTED = false; // la synchronisation complète des états a-t-elle démarré ?
+let FULL_SYNC_STARTED = false; // (compat) une synchro complète a-t-elle déjà été demandée ?
+let SESSION_ID = 0; // incrémenté à chaque connexion/déconnexion (annule les refresh périmés)
 
 function startBootstrapPrefetch() {
   if (DEMO_MODE || !API_URL || PREFETCH) return;
@@ -914,28 +929,174 @@ function startBootstrapPrefetch() {
   PREFETCH = api('bootstrap', sheetName ? { state: sheetName } : {}).catch(() => null); // échec silencieux : initApp relancera
 }
 
-// 🔄 Synchronisation silencieuse de TOUS les états, en arrière-plan, après
-// l'affichage du 1er onglet. Remplit S.states pour que chaque onglet s'ouvre
-// instantanément ensuite. Ne touche jamais à l'onglet en cours d'affichage.
-async function syncStatesInBackground() {
-  if (FULL_SYNC_STARTED) return;
-  FULL_SYNC_STARTED = true;
+// ════════════════════════════════════════════════════════════════════
+//  CHARGEMENT OPTIMISTE DES ONGLETS — plus JAMAIS d'attente bloquante.
+//  Les grilles (Chaud / Froid / Autres / Bi-Ann. / appareils) ont une
+//  structure 100 % connue côté client : on les DESSINE immédiatement (avec
+//  les données déjà en cache), puis la feuille est synchronisée en fond par
+//  de PETITES requêtes (1 par feuille). Plus jamais le gros paquet complet
+//  qui sature la connexion, plus jamais de roue qui tourne 20 s.
+// ════════════════════════════════════════════════════════════════════
+
+const stateFetchers = {}; // feuille → promesse en vol (dédoublonnage)
+const recFetchers   = {}; // onglet enregistrements → promesse en vol
+let BG_REFRESH = null;    // promesse du rafraîchissement d'arrière-plan
+let KEEPALIVE_TIMER = null;
+
+function sheetTabFor(sheetName) {
+  for (const t in SHEET_NAMES) if (SHEET_NAMES[t] === sheetName) return t;
+  return null;
+}
+function tabForStateKey(key) {
+  if (key === 'Fréquences Bi-Annuelles') return 'biannuel';
+  if (key && key.indexOf('App_') === 0) return 'app_' + key.slice(4);
+  return sheetTabFor(key);
+}
+
+// 1 seule requête en vol par feuille : le clic d'un onglet et le pré-chargement
+// d'arrière-plan partagent la même promesse (jamais 2 appels identiques).
+function ensureStateFetched(tab, key, force) {
+  if (!force && S.states[key] !== undefined) return Promise.resolve(S.states[key]);
+  if (stateFetchers[key]) return stateFetchers[key];
+  const p = (async () => {
+    let raw;
+    if (BOOTSTRAP_OK) {
+      const r = await api('bootstrap', { state: key }); // réponse légère : 1 feuille
+      if (r && r.ok) raw = (r.states || {})[key];
+    }
+    if (raw === undefined) {
+      // Ancien backend (sans bootstrap/light) ou feuille encore vide → action dédiée
+      raw = (tab === 'biannuel') ? await api('loadBiannuelState')
+          : (tab.startsWith('app_') ? await api('loadAppareilState', { appareilId: tab.slice(4) })
+          : await api('loadHebdoState', { sheetName: key }));
+    }
+    raw = raw || {};
+    S.states[key] = raw;
+    return raw;
+  })().finally(() => { delete stateFetchers[key]; });
+  stateFetchers[key] = p;
+  return p;
+}
+
+// Rejoue l'état d'une feuille dans les structures d'affichage (cases/méta/commentaires)
+function applyTabState(tab, key, raw) {
+  raw = raw || {};
+  if (tab === 'biannuel') applyState('biannuel', raw);
+  else if (tab.startsWith('app_')) {
+    const id = tab.slice(4);
+    S.appChecks[id] = {};
+    Object.entries(raw).forEach(([k, v]) => { S.appChecks[id][k] = (v === true || v === 'TRUE'); });
+  } else applyState(tab, raw);
+  S.states[key] = raw;
+}
+
+// Ouvre un onglet d'état : affichage immédiat + synchronisation en arrière-plan
+async function openStateTab(tab) {
+  const key = pendingStateTab(tab);
+  // Déjà affiché → rien à recharger (S.checks reste la vérité d'écran)
+  if (S.loaded.has(tab)) { renderTab(tab); return; }
+  // Feuille déjà synchronisée (cache local / prefetch) → rejouée et affichée SANS réseau
+  if (!key || S.states[key] !== undefined) {
+    if (key) applyTabState(tab, key, S.states[key]);
+    S.loaded.add(tab);
+    renderTab(tab);
+    return;
+  }
+  // Première visite : on dessine la grille IMMÉDIATEMENT (structure connue)…
+  renderTab(tab);
+  const c = document.getElementById('main-content');
+  const banner = document.createElement('div');
+  banner.className = 'hydrate-banner';
+  banner.innerHTML = '<span class="mini-spin"></span> Synchronisation des données…';
+  c.classList.add('hydrate-lock');
+  c.insertBefore(banner, c.firstChild);
+  // …puis la feuille arrive en arrière-plan (petite requête, jamais bloquante)
   try {
-    const r = await api('bootstrap');
-    if (!r || !r.ok) return;
-    saveCache(r);
-    // Fusionne les états absents du cache local sans écraser ce qui est affiché
-    Object.keys(r.states || {}).forEach(k => { if (!S.states[k]) S.states[k] = r.states[k]; });
-    // Invalide les onglets d'état non visités pour qu'ils relisent le cache frais
+    const raw = await ensureStateFetched(tab, key, false);
+    applyTabState(tab, key, raw);
+  } catch (e) {
+    c.classList.remove('hydrate-lock');
+    banner.classList.add('hydrate-err');
+    banner.innerHTML = '⚠️ Données non synchronisées — <button class="btn btn-sm" onclick="retryOpenTab(\'' + tab + '\')">🔄 Réessayer</button>';
+    return;
+  }
+  if (S.tab !== tab) return; // parti ailleurs : le prochain clic relira le cache frais
+  S.loaded.add(tab);
+  renderTab(tab); // re-dessin avec les vraies valeurs (enlève le bandeau + le verrou)
+}
+
+function retryOpenTab(tab) { loadAndRender(tab); }
+
+// 🔄 Rafraîchissement silencieux de TOUTES les données en arrière-plan, juste
+// après le 1er affichage. Petites requêtes par feuille, 3 en parallèle max : rien
+// ne sature la connexion ni la file d'exécution d'Apps Script, et l'onglet affiché
+// n'est jamais interrompu ni re-rendu.
+function scheduleBgRefresh() {
+  if (BG_REFRESH) return BG_REFRESH;
+  const sid = SESSION_ID;
+  const p = (async () => {
+    let okCount = 0, failStreak = 0;
+    // 1) Liste des appareils à jour (nouveaux onglets compris) — silencieux si échec
+    try {
+      const g = await api('getAppData');
+      if (g && g.ok) {
+        if (JSON.stringify(g.appareils || []) !== JSON.stringify(S.appareils || [])) {
+          S.appareils = g.appareils || [];
+          updateAppareilsTabs();
+        }
+      }
+    } catch (e) { /* silencieux */ }
+    // 2) États de toutes les feuilles (une petite requête chacune)
+    const keys = [];
+    Object.keys(SHEET_NAMES).forEach(t => keys.push(SHEET_NAMES[t]));
+    keys.push('Fréquences Bi-Annuelles');
+    (S.appareils || []).forEach(a => { if (a.actif) keys.push('App_' + a.id); });
+    let idx = 0;
+    const worker = async () => {
+      while (idx < keys.length && failStreak < 3) {
+        const key = keys[idx++];
+        const tab = tabForStateKey(key);
+        if (!tab) continue;
+        try { await ensureStateFetched(tab, key, true); okCount++; failStreak = 0; }
+        catch (e) { failStreak++; }
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    // 3) Enregistrements (prélèvements, pesées, machines, congélateur) en pré-charge
+    for (const rec of ['prelevements', 'pesees', 'maintenance', 'freezer']) {
+      if (failStreak >= 3 || S.loaded.has(rec) || S.tab === rec) continue;
+      try { await ensureRecordsFetched(rec); S.loaded.add(rec); okCount++; failStreak = 0; }
+      catch (e) { failStreak++; }
+    }
+    if (sid !== SESSION_ID) return; // déconnexion entre-temps → on abandonne
+    // 4) Les onglets non affichés reliront le cache frais au prochain clic
     S.loaded.forEach(t => {
       if (t !== S.tab && (SHEET_NAMES[t] || t === 'biannuel' || t.startsWith('app_'))) S.loaded.delete(t);
     });
-  } catch (e) { /* silencieux : les onglets se chargeront à la demande */ }
+    if (okCount > 0) {
+      saveCache({ ok: true, appareils: S.appareils || [], states: S.states || {} });
+      connRetryCount = 0;
+      setApiStatus('');
+      toast('✅ Données à jour');
+    }
+  })();
+  p.finally(() => { if (BG_REFRESH === p) BG_REFRESH = null; });
+  BG_REFRESH = p;
+  return p;
 }
 
-// Onglet dont l'état manque encore ? → sera chargé à la demande par loadAndRender
+// Garde le script Apps Script éveillé pendant qu'un utilisateur travaille
+// (1 ping toutes les 4 min → plus de cold start de 10-30 s en plein milieu).
+function startKeepalive() {
+  if (DEMO_MODE || KEEPALIVE_TIMER || !API_URL) return;
+  KEEPALIVE_TIMER = setInterval(() => {
+    if (!API_URL || DEMO_MODE || document.visibilityState === 'hidden') return;
+    api('ping').catch(() => {});
+  }, 4 * 60 * 1000);
+}
+
+// Onglet d'état ? Renvoie sa feuille (null pour enregistrements / manager / elog)
 function pendingStateTab(tab) {
-  if (!BOOTSTRAP_OK) return null;
   if (SHEET_NAMES[tab]) return SHEET_NAMES[tab];
   if (tab === 'biannuel') return 'Fréquences Bi-Annuelles';
   if (tab && tab.startsWith('app_')) return 'App_' + tab.slice(4);
@@ -1367,18 +1528,8 @@ function applyBootstrap(r, opts = {}) {
   }
 }
 
-// Refresh silencieux après un affichage depuis le cache
-async function refreshInBackground() {
-  try {
-    const r = await api('bootstrap');
-    if (r && r.ok) {
-      connRetryCount = 0;
-      saveCache(r);
-      applyBootstrap(r, { refresh: true });
-      toast('✅ Données à jour');
-    }
-  } catch (e) { /* silencieux : le cache reste affiché */ }
-}
+// Refresh silencieux après un affichage depuis le cache (petites requêtes par feuille)
+function refreshInBackground() { scheduleBgRefresh(); }
 
 async function initApp() {
   const c = document.getElementById('main-content');
@@ -1411,8 +1562,8 @@ async function initApp() {
     connRetryCount = 0; // succès → réinitialise le compteur d'échecs consécutifs
     if (BOOTSTRAP_OK && r.states) saveCache(r);
     applyBootstrap(r);
-    // ⚡ Réponse légère (1 seul état) → on récupère les autres en silence
-    if (BOOTSTRAP_OK && Object.keys(r.states || {}).length < 4) syncStatesInBackground();
+    // ⚡ Les autres feuilles sont récupérées en silence, par petites requêtes légères
+    scheduleBgRefresh();
   } catch(e) { showConnError(e.message); }
 }
 
@@ -1500,6 +1651,8 @@ function updateAppareilsTabs() {
 
 function switchTab(tab, el) {
   S.tab = tab;
+  // Un bandeau de synchronisation en cours ne doit jamais bloquer un autre onglet
+  document.getElementById('main-content').classList.remove('hydrate-lock');
   // Mémorise le dernier onglet d'état visité → l'app rouvrira dessus
   if (pendingStateTab(tab)) { try { sessionStorage.setItem('tc_last_tab', tab); } catch (e) {} }
   document.querySelectorAll('#tabs-bar .tab').forEach(t => t.classList.toggle('active', t.getAttribute('data-tab')===tab));
@@ -1514,45 +1667,43 @@ function switchTab(tab, el) {
 }
 
 async function loadAndRender(tab) {
+  // Les onglets d'état (grilles) s'affichent TOUJOURS immédiatement : leur structure
+  // est connue côté client → dessin tout de suite (données déjà en cache), puis la
+  // feuille se synchronise en arrière-plan. Plus jamais de roue qui tourne 20 s.
+  if (pendingStateTab(tab)) return openStateTab(tab);
+  // Onglets "enregistrements" (prélèvements, pesées, machines, congélateur) :
+  // contenu 100 % serveur → chargement avec indicateur, partagé avec la pré-charge.
   const c = document.getElementById('main-content');
   c.innerHTML = '<div class="loading"><div class="spinner"></div><span id="api-status">Chargement...</span></div>';
   try {
-    // Sécurité : l'état de cet onglet n'a pas encore été synchronisé en arrière-plan
-    // (syncStatesInBackground pas terminée) → chargement à la demande, juste lui.
-    const stateKey = pendingStateTab(tab);
-    if (stateKey && S.states[stateKey] === undefined) {
-      try {
-        S.states[stateKey] = (tab === 'biannuel')
-          ? await api('loadBiannuelState')
-          : (tab.startsWith('app_')
-              ? await api('loadAppareilState', { appareilId: tab.slice(4) })
-              : await api('loadHebdoState', { sheetName: stateKey }));
-      } catch (e) { /* réseau : le rendu continuera avec ce qui est disponible */ }
-    }
-    if (tab==='biannuel') { if (BOOTSTRAP_OK) { applyState('biannuel', S.states['Fréquences Bi-Annuelles'] || {}); } else { const st=await api('loadBiannuelState'); applyState('biannuel',st); } }
-    else if (tab==='prelevements') { const r=await api('loadPrelevements'); S.prelevements=r.rows||[]; }
-    else if (tab==='pesees') { const r=await api('loadPesees'); S.pesees=r.rows||[]; }
-    else if (tab==='maintenance') {
+    await ensureRecordsFetched(tab);
+  } catch(e) { toast('⚠️ Chargement partiel: '+e.message,true); }
+  if (S.tab !== tab) return; // l'utilisateur est parti entre-temps
+  S.loaded.add(tab);
+  renderTab(tab);
+}
+
+// Prépare les données d'un onglet enregistrements (une seule requête en vol par
+// onglet : le clic et le pré-chargement d'arrière-plan partagent la promesse).
+function ensureRecordsFetched(tab) {
+  if (recFetchers[tab]) return recFetchers[tab];
+  const p = (async () => {
+    if (tab === 'prelevements') { const r = await api('loadPrelevements'); S.prelevements = r.rows || []; }
+    else if (tab === 'pesees') { const r = await api('loadPesees'); S.pesees = r.rows || []; }
+    else if (tab === 'maintenance') {
       const [machinesRes, maintenanceRes] = await Promise.all([api('loadMachines'), api('loadMaintenance')]);
       S.machines = machinesRes.rows || [];
       S.maintenanceRows = maintenanceRes.rows || [];
       if (!S.maintenanceMachineId && S.machines.length) S.maintenanceMachineId = S.machines[0].id;
     }
-    else if (tab==='freezer') {
-      const r=await api('loadFreezerData');
+    else if (tab === 'freezer') {
+      const r = await api('loadFreezerData');
       S.freezerItems = (r.items || []).map(normalizeFreezerItem);
       S.freezerMeta = Object.assign({dateDebut:'',dateFin:'',filtreRack:''}, r.meta || {});
     }
-    else if (tab.startsWith('app_')) {
-      const id=tab.replace('app_','');
-      const st=BOOTSTRAP_OK ? (S.states['App_'+id] || {}) : await api('loadAppareilState',{appareilId:id});
-      S.appChecks[id]={};
-      Object.entries(st||{}).forEach(([k,v])=>{ S.appChecks[id][k]=v===true||v==='TRUE'; });
-    } else if (BOOTSTRAP_OK) { applyState(tab, S.states[SHEET_NAMES[tab]] || {}); }
-    else { const st=await api('loadHebdoState',{sheetName:SHEET_NAMES[tab]}); applyState(tab,st); }
-    S.loaded.add(tab);
-  } catch(e) { toast('⚠️ Chargement partiel: '+e.message,true); }
-  renderTab(tab);
+  })().finally(() => { delete recFetchers[tab]; });
+  recFetchers[tab] = p;
+  return p;
 }
 
 function applyState(tabId, st) {
@@ -1570,6 +1721,7 @@ function applyState(tabId, st) {
 
 function renderTab(tab) {
   const c = document.getElementById('main-content');
+  c.classList.remove('hydrate-lock'); // nettoie un éventuel verrou de synchronisation en cours
   if (tab==='temp-manager') c.innerHTML=buildManager();
   else if (tab==='prelevements') c.innerHTML=buildPrelevements();
   else if (tab==='pesees') c.innerHTML=buildPesees();
